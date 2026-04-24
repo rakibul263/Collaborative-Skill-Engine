@@ -1,0 +1,26 @@
+const INITIAL_SKILLS = [
+  "HTML",
+  "CSS",
+  "JavaScript",
+  "TypeScript",
+  "React",
+  "Next.js",
+  "Node.js",
+  "Express.js",
+  "MongoDB",
+  "MySQL",
+  "Python",
+  "Django",
+  "Figma",
+  "Canva",
+  "UI Design",
+  "UX Design",
+  "Graphic Design",
+  "Video Editing",
+  "Digital Marketing",
+  "SEO",
+  "AI",
+  "Machine Learning",
+].sort();
+
+module.exports = { INITIAL_SKILLS };
