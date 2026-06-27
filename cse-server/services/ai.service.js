@@ -1,5 +1,7 @@
+const { ChatGroq } = require("@langchain/groq");
 const {
   retrieveRelevantDocuments,
+  keywordFallbackRetrieve,
 } = require("./vectorRetrieval.service");
 
 const GOAL_SKILL_MAP = {
@@ -78,6 +80,22 @@ const buildStructuredFallback = ({
   };
 };
 
+const parseJsonFromModel = (text) => {
+  const trimmed = text.trim();
+  const fenced = trimmed.match(/```json\s*([\s\S]*?)```/i);
+  const raw = fenced ? fenced[1] : trimmed;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      return JSON.parse(raw.slice(start, end + 1));
+    }
+    throw new Error("Model returned invalid JSON");
+  }
+};
+
 const generateAdvisorResponse = async ({
   userProfile,
   goal,
@@ -94,19 +112,124 @@ const generateAdvisorResponse = async ({
       learnSkills: userProfile.learnSkills || [],
     });
   } catch {
-    ragResult = { chunks: [] };
+    ragResult = keywordFallbackRetrieve({
+      goal,
+      teachSkills: userProfile.teachSkills || [],
+      learnSkills: userProfile.learnSkills || [],
+    });
   }
 
-  const fallback = buildStructuredFallback({
-    userProfile,
-    goal,
-    message,
-    ragChunks: ragResult.chunks || [],
-    mentorSuggestions,
-    memoryContext,
-  });
+  const ragContext = ragResult.chunks
+    .map(
+      (c, i) =>
+        `[Doc ${i + 1}: ${c.source}]\n${c.content.slice(0, 900)}`,
+    )
+    .join("\n\n");
 
-  return { ...fallback, mode: "rules+rag" };
+  // Build model: use Groq (free, fast). Fallback to rules-based if no key set.
+  let model = null;
+
+  if (process.env.GROQ_API_KEY) {
+    model = new ChatGroq({
+      model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
+      temperature: 0.4,
+      apiKey: process.env.GROQ_API_KEY,
+    });
+  }
+
+  if (!model) {
+    const fallback = buildStructuredFallback({
+      userProfile,
+      goal,
+      message,
+      ragChunks: ragResult.chunks,
+      mentorSuggestions,
+      memoryContext,
+    });
+    return { ...fallback, mode: "rules+rag" };
+  }
+
+  const systemPrompt = `You are the AI Career Advisor inside "Collaborative Skill Engine".
+Rules:
+- NEVER give generic advice. Always reference the user's name, skills, levels, education, and memory.
+- Use RAG context when relevant.
+- Be concise, actionable, bullet-friendly.
+- Adapt recommendations to teachLevel and learnLevel.
+- Output ONLY valid JSON with this schema:
+{
+  "careerDirection": "string",
+  "skillGapAnalysis": [{"skill":"string","priority":"high|medium|low","reason":"string"}],
+  "learningRoadmap": [{"phase":"string","focus":"string","action":"string"}],
+  "suggestedProjects": ["string"],
+  "recommendedSkills": ["string"],
+  "prioritySteps": [{"step":"string","timeframe":"string","why":"string"}],
+  "mentorSuggestions": [{"fullName":"string","email":"string","reason":"string","matchPercentage":number}],
+  "reply": "string (conversational answer to user message)"
+}`;
+
+  const userPrompt = `USER PROFILE:
+${JSON.stringify(
+    {
+      fullName: userProfile.fullName,
+      email: userProfile.email,
+      teachSkills: userProfile.teachSkills,
+      learnSkills: userProfile.learnSkills,
+      teachLevel: userProfile.teachLevel,
+      learnLevel: userProfile.learnLevel,
+      education: userProfile.education,
+      connectionsCount: (userProfile.connections || []).length,
+    },
+    null,
+    2,
+  )}
+
+GOAL: ${goal || "Not specified"}
+USER MESSAGE: ${message}
+
+MEMORY:
+- Platform chats: ${memoryContext.platformChatSummary}
+- Advisor history: ${memoryContext.advisorChatSummary}
+- Recent goals: ${(memoryContext.recentGoals || []).join(", ") || "none"}
+
+MENTOR MATCHES (from platform):
+${JSON.stringify(mentorSuggestions.slice(0, 5), null, 2)}
+
+RAG CONTEXT:
+${ragContext || "No documents retrieved"}`;
+
+  try {
+    const completion = await model.invoke([
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ]);
+
+    const parsed = parseJsonFromModel(
+      typeof completion.content === "string"
+        ? completion.content
+        : JSON.stringify(completion.content),
+    );
+
+    return {
+      ...parsed,
+      mentorSuggestions:
+        parsed.mentorSuggestions?.length > 0
+          ? parsed.mentorSuggestions
+          : mentorSuggestions,
+      retrievedSources: ragResult.chunks.map((c) => c.source),
+      mode: "groq+rag",
+    };
+  } catch (llmError) {
+    console.warn("[AI Advisor] Groq failed, using rules fallback:", llmError.message);
+    const fallback = buildStructuredFallback({
+      userProfile,
+      goal,
+      message,
+      ragChunks: ragResult.chunks,
+      mentorSuggestions,
+      memoryContext,
+    });
+    return { ...fallback, mode: "fallback+rag", llmError: llmError.message };
+  }
 };
 
 module.exports = { generateAdvisorResponse, inferSkillGaps };
