@@ -8,13 +8,26 @@ const { loadKnowledgeDocuments } = require("./knowledgeLoader");
 const VECTOR_DIR = path.join(__dirname, "../storage/faiss-index");
 let vectorStore = null;
 let initPromise = null;
+let vectorDisabled = false;
 
+const withTimeout = (promise, ms, label) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms),
+    ),
+  ]);
+
+// Embeddings: use Google if available, otherwise vector store is disabled (keyword fallback used)
 const getEmbeddings = () => {
-  const { GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai");
-  return new GoogleGenerativeAIEmbeddings({
-    model: process.env.GEMINI_EMBEDDING_MODEL || "text-embedding-004",
-    apiKey: process.env.GOOGLE_API_KEY,
-  });
+  if (process.env.GOOGLE_API_KEY) {
+    const { GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai");
+    return new GoogleGenerativeAIEmbeddings({
+      model: process.env.GEMINI_EMBEDDING_MODEL || "text-embedding-004",
+      apiKey: process.env.GOOGLE_API_KEY,
+    });
+  }
+  throw new Error("No embedding provider available — vector store disabled");
 };
 
 const buildVectorStore = async () => {
@@ -48,8 +61,19 @@ const initVectorStore = async () => {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
+    let embeddings;
+    try {
+      embeddings = getEmbeddings();
+    } catch {
+      console.warn(
+        "[AI Advisor] No embedding provider — RAG vector store disabled, using keyword fallback",
+      );
+      vectorDisabled = true;
+      return null;
+    }
+
     if (fs.existsSync(path.join(VECTOR_DIR, "faiss.index"))) {
-      vectorStore = await FaissStore.load(VECTOR_DIR, getEmbeddings());
+      vectorStore = await FaissStore.load(VECTOR_DIR, embeddings);
       return vectorStore;
     }
 
@@ -60,10 +84,11 @@ const initVectorStore = async () => {
   })();
 
   try {
-    return await initPromise;
+    return await withTimeout(initPromise, 45000, "FAISS init");
   } catch (error) {
     console.warn("[AI Advisor] Vector store unavailable:", error.message);
     initPromise = null;
+    vectorDisabled = true;
     return null;
   }
 };
@@ -75,9 +100,13 @@ const retrieveRelevantDocuments = async ({
   learnSkills = [],
   topK = 5,
 }) => {
+  if (vectorDisabled) {
+    return keywordFallbackRetrieve({ goal, teachSkills, learnSkills });
+  }
+
   const store = await initVectorStore();
   if (!store) {
-    throw new Error("Vector store not available");
+    return keywordFallbackRetrieve({ goal, teachSkills, learnSkills });
   }
 
   const query = [
@@ -100,8 +129,50 @@ const retrieveRelevantDocuments = async ({
   return { chunks, query };
 };
 
+const keywordFallbackRetrieve = ({ goal, teachSkills, learnSkills }) => {
+  const rawDocs = loadKnowledgeDocuments();
+  const terms = [
+    goal,
+    ...teachSkills,
+    ...learnSkills,
+    "roadmap",
+    "career",
+  ]
+    .join(" ")
+    .toLowerCase();
+
+  const scored = rawDocs
+    .map((doc) => {
+      const text = doc.pageContent.toLowerCase();
+      let score = 0;
+      if (goal && text.includes(goal.toLowerCase().split(" ")[0])) {
+        score += 3;
+      }
+      for (const skill of [...teachSkills, ...learnSkills]) {
+        if (skill && text.includes(skill.toLowerCase())) score += 2;
+      }
+      if (doc.metadata.category && terms.includes(doc.metadata.category)) {
+        score += 1;
+      }
+      return { doc, score };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 4);
+
+  return {
+    chunks: scored.map(({ doc }) => ({
+      content: doc.pageContent.slice(0, 1200),
+      source: doc.metadata.source,
+      topic: doc.metadata.topic,
+      category: doc.metadata.category,
+    })),
+    query: "keyword-fallback",
+  };
+};
+
 module.exports = {
   initVectorStore,
   retrieveRelevantDocuments,
+  keywordFallbackRetrieve,
   VECTOR_DIR,
 };
