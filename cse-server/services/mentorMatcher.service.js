@@ -1,4 +1,11 @@
+const Fuse = require("fuse.js");
 const { normalize } = require("../utils/skillNormalize");
+
+const createFuse = (skills) =>
+  new Fuse(skills, {
+    includeScore: true,
+    threshold: 0.4,
+  });
 
 const findMentorSuggestions = async ({
   usersCollection,
@@ -35,8 +42,30 @@ const findMentorSuggestions = async ({
 
     if (teachSkills.length === 0) continue;
 
-    const teachSet = new Set(teachSkills.map((t) => t.normalized));
-    const matchCount = learnSkills.filter((l) => teachSet.has(l.normalized)).length;
+    const fuse = createFuse(teachSkills.map((s) => s.normalized));
+    let matchCount = 0;
+    const matchedSkills = [];
+
+    for (const learn of learnSkills) {
+      const exact = teachSkills.find((t) => t.normalized === learn.normalized);
+      if (exact) {
+        matchCount++;
+        matchedSkills.push({
+          learnSkill: learn.original,
+          matchedWith: exact.original,
+        });
+        continue;
+      }
+      const matches = fuse.search(learn.normalized);
+      if (matches.length > 0 && matches[0].score < 0.4) {
+        const matchedSkill = teachSkills[matches[0].refIndex];
+        matchCount++;
+        matchedSkills.push({
+          learnSkill: learn.original,
+          matchedWith: matchedSkill.original,
+        });
+      }
+    }
 
     if (matchCount > 0) {
       results.push({
@@ -47,7 +76,7 @@ const findMentorSuggestions = async ({
         teachSkills: user.teachSkills,
         matchCount,
         matchPercentage: Math.round((matchCount / learnSkills.length) * 100),
-        matchedSkills: [],
+        matchedSkills,
         reason: `Teaches ${matchCount} skill(s) you want to learn`,
       });
     }
