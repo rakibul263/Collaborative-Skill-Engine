@@ -6,18 +6,48 @@ const Fuse = require("fuse.js");
 const cookieParser = require("cookie-parser");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
-const cloudinary = require("cloudinary").v2;
 const { registerAiAdvisorRoutes } = require("./routes/aiAdvisor.routes");
 const { registerAuthRoutes } = require("./routes/auth.routes");
+const { registerNotificationRoutes } = require("./routes/notifications.routes");
+const { registerScheduleRoutes } = require("./routes/schedule.routes");
+const { registerUserNotificationRoutes } = require("./routes/userNotifications.routes");
+const { registerCoursesRoutes } = require("./routes/courses.routes");
+const { registerAdminRoutes } = require("./routes/admin.routes");
+const { registerDashboardRoutes } = require("./routes/dashboard.routes");
+const { registerStudioRoutes } = require("./routes/studio.routes");
 const { registerCvParserRoutes } = require("./routes/cvParser.routes");
-const { verifyJWT } = require("./middleware/verifyJWT");
+const { initVectorStore } = require("./services/vectorRetrieval.service");
+const { initFirebaseAdmin } = require("./config/firebaseAdmin");
+const cloudinary = require("cloudinary").v2;
+const crypto = require("crypto");
 
+// ── Cloudinary initialisation (server-side; used only for deletion of old images)
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  api_key: process.env.CLOUDINARY_API_KEY,
+  api_key:    process.env.CLOUDINARY_API_KEY,
   api_secret: process.env.CLOUDINARY_API_SECRET,
-  secure: true,
+  secure:     true,
 });
+
+/**
+ * Deletes a Cloudinary asset by its public_id.
+ * Resolves silently even if the asset does not exist.
+ * @param {string} publicId
+ * @param {string} [resourceType="image"]
+ * @returns {Promise<void>}
+ */
+const deleteCloudinaryImage = async (publicId, resourceType = "image") => {
+  if (!publicId || !process.env.CLOUDINARY_API_SECRET) return;
+  try {
+    await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
+  } catch (err) {
+    try {
+      await cloudinary.uploader.destroy(publicId, { resource_type: "raw" });
+    } catch (e) {
+      console.error("[Cloudinary Delete Error]:", e.message);
+    }
+  }
+};
 
 const app = express();
 const httpServer = createServer(app);
@@ -31,7 +61,9 @@ const corsConfig = {
   credentials: true,
 };
 
-app.use(cors(corsConfig));
+app.use(
+  cors(corsConfig),
+);
 app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser());
 
@@ -45,42 +77,20 @@ const emitOnlineUsers = () => {
   io.emit("presence:online-users", getOnlineEmails());
 };
 
-const normalize = (s = "") =>
-  s
+const normalize = (s = "") => {
+  return s
     .toLowerCase()
     .replace(/\.js/g, "")
     .replace(/\s+/g, "")
     .replace(/[^a-z]/g, "");
+};
 
-const createFuse = (skills) =>
-  new Fuse(skills, {
+const createFuse = (skills) => {
+  return new Fuse(skills, {
     includeScore: true,
     threshold: 0.4,
   });
-
-app.get("/", (_req, res) => {
-  res.json({ ok: true, service: "Collaborative Skill Engine API" });
-});
-
-app.get("/server-time", (_req, res) => {
-  res.json({ time: new Date().toISOString() });
-});
-
-app.post("/cloudinary/sign", (req, res) => {
-  const { public_id, folder } = req.body || {};
-  const timestamp = Math.floor(Date.now() / 1000);
-  const params = { timestamp, public_id, folder };
-  const signature = cloudinary.utils.api_sign_request(
-    params,
-    process.env.CLOUDINARY_API_SECRET,
-  );
-  res.json({
-    timestamp,
-    signature,
-    api_key: process.env.CLOUDINARY_API_KEY,
-    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
-  });
-});
+};
 
 let client;
 
@@ -91,7 +101,6 @@ async function run() {
       console.error("MONGODB_URI not set in .env file");
       process.exit(1);
     }
-
     client = new MongoClient(uri, {
       serverApi: {
         version: ServerApiVersion.v1,
@@ -100,8 +109,16 @@ async function run() {
       },
       maxPoolSize: 50,
       minPoolSize: 5,
+      connectTimeoutMS: 30000,
+      socketTimeoutMS: 45000,
+      serverSelectionTimeoutMS: 10000,
+      heartbeatFrequencyMS: 10000,
+      retryWrites: true,
+      retryReads: true,
     });
     await client.connect();
+
+    const { verifyJWT } = require("./middleware/verifyJWT");
 
     const db = client.db("skillEngineDB");
     const usersCollection = db.collection("user_list");
@@ -110,358 +127,456 @@ async function run() {
     const messagesCollection = db.collection("messages");
     const ratingsCollection = db.collection("user_ratings");
     const aiAdvisorSessionsCollection = db.collection("ai_advisor_sessions");
+    const notificationsCollection = db.collection("notifications");
+    const schedulesCollection = db.collection("schedules");
+    const userNotificationsCollection = db.collection("user_notifications");
+    const coursesCollection = db.collection("courses");
+    const courseEnrollmentsCollection = db.collection("course_enrollments");
+    const lessonsCollection = db.collection("lessons");
+    const courseReviewsCollection = db.collection("course_reviews");
+    const courseCouponsCollection = db.collection("course_coupons");
+    const studioAuditLogsCollection = db.collection("studio_audit_logs");
+
+    await connectionRequestsCollection.createIndex(
+      { senderEmail: 1, receiverEmail: 1, status: 1 },
+      { unique: true, partialFilterExpression: { status: "pending" } },
+    );
+    await conversationsCollection.createIndex(
+      { participantsKey: 1 },
+      { unique: true },
+    );
+    await conversationsCollection.createIndex({ participants: 1 });
+    await messagesCollection.createIndex({ conversationId: 1, createdAt: 1 });
+    await messagesCollection.createIndex({ receiverEmail: 1, seenAt: 1 });
+    await ratingsCollection.createIndex(
+      { reviewerEmail: 1, targetEmail: 1 },
+      { unique: true },
+    );
+    await ratingsCollection.createIndex({ targetEmail: 1, createdAt: -1 });
+    await aiAdvisorSessionsCollection.createIndex({ userEmail: 1, createdAt: -1 });
+    await schedulesCollection.createIndex({ conversationId: 1, status: 1 });
+    await schedulesCollection.createIndex({ startTime: 1, status: 1 });
+    await userNotificationsCollection.createIndex({ recipientEmail: 1, createdAt: -1 });
+    await userNotificationsCollection.createIndex({ recipientEmail: 1, isRead: 1 });
+
+    await coursesCollection.createIndex({ instructorEmail: 1, status: 1 });
+    await coursesCollection.createIndex({ status: 1 });
+    await coursesCollection.createIndex(
+      { instructorEmail: 1, topic: 1 },
+      { unique: true }
+    );
+    await courseEnrollmentsCollection.createIndex(
+      { courseId: 1, learnerEmail: 1 },
+      { unique: true }
+    );
+    await courseEnrollmentsCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
+    await courseEnrollmentsCollection.createIndex({ createdAt: -1 });
+    await lessonsCollection.createIndex({ courseId: 1, order: 1 });
+    await courseReviewsCollection.createIndex({ courseId: 1, createdAt: -1 });
+    await courseCouponsCollection.createIndex({ instructorEmail: 1, code: 1 });
+
+    initFirebaseAdmin();
 
     registerAuthRoutes(app, { usersCollection });
+
+    registerNotificationRoutes(app, { notificationsCollection, io });
+
+    registerScheduleRoutes(app, { schedulesCollection, conversationsCollection, usersCollection, io, userNotificationsCollection });
+    registerUserNotificationRoutes(app, { userNotificationsCollection, io });
+
+    registerCoursesRoutes(app, {
+      coursesCollection,
+      courseEnrollmentsCollection,
+      usersCollection,
+      ratingsCollection,
+      schedulesCollection,
+      userNotificationsCollection,
+      lessonsCollection,
+      io,
+    });
+    registerAdminRoutes(app, {
+      usersCollection,
+      coursesCollection,
+      courseEnrollmentsCollection,
+      ratingsCollection,
+      schedulesCollection,
+      userNotificationsCollection,
+      lessonsCollection,
+      io,
+    });
+
+    registerDashboardRoutes(app, {
+      coursesCollection,
+      courseEnrollmentsCollection,
+      usersCollection,
+      lessonsCollection,
+      io,
+    });
+
+    registerStudioRoutes(app, {
+      usersCollection,
+      coursesCollection,
+      courseEnrollmentsCollection,
+      lessonsCollection,
+      ratingsCollection,
+      schedulesCollection,
+      userNotificationsCollection,
+      courseReviewsCollection,
+      courseCouponsCollection,
+      studioAuditLogsCollection,
+      io,
+    });
+
+    registerCvParserRoutes(app);
+
+    // ===== Cloudinary Signed Upload =====
+    // Generates a server-side signature so the client can upload directly to
+    // Cloudinary without exposing the API secret or requiring an unsigned preset.
+    //
+    // Security: JWT required — only authenticated users can get a signature.
+    // The api_key is returned (safe to expose); api_secret never leaves the server.
+    {
+      app.post("/cloudinary/sign", verifyJWT, (req, res) => {
+        const apiSecret = process.env.CLOUDINARY_API_SECRET;
+        const apiKey    = process.env.CLOUDINARY_API_KEY;
+        const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+
+        if (!apiSecret || !apiKey || !cloudName) {
+          return res.status(503).json({
+            success: false,
+            message: "Cloudinary is not configured on the server.",
+          });
+        }
+
+        const timestamp = Math.round(Date.now() / 1000);
+        const folder    = req.body?.folder || "profile_images";
+
+        // Signature = SHA-256 of "folder=<f>&timestamp=<ts><secret>"
+        // Parameters must be sorted alphabetically; exclude api_key, file, resource_type
+        const paramsToSign = `folder=${folder}&timestamp=${timestamp}`;
+        const signature = crypto
+          .createHash("sha256")
+          .update(paramsToSign + apiSecret)
+          .digest("hex");
+
+        return res.json({
+          success: true,
+          signature,
+          apiKey,
+          timestamp,
+          cloudName,
+          folder,
+        });
+      });
+    }
+
+    // ===== Schedule Scheduler =====
+    const activatingEmitted = new Set();
+
+    const runExpiryAndActivationScan = async () => {
+      try {
+        const now = new Date();
+        const tenMinutesFromNow = new Date(now.getTime() + 10 * 60 * 1000);
+
+        // 1. Activation scan — emit schedule:activating for accepted schedules entering the 10-min window
+        const activating = await schedulesCollection
+          .find({
+            status: "accepted",
+            startTime: { $lte: tenMinutesFromNow.toISOString(), $gt: now.toISOString() },
+          })
+          .toArray();
+
+        for (const doc of activating) {
+          const key = doc._id.toString();
+          if (!activatingEmitted.has(key)) {
+            activatingEmitted.add(key);
+            const payload = {
+              scheduleId: key,
+              conversationId: doc.conversationId.toString(),
+            };
+            io.to(`user:${doc.schedulerEmail}`).emit("schedule:activating", payload);
+            io.to(`user:${doc.inviteeEmail}`).emit("schedule:activating", payload);
+          }
+        }
+
+        // Clean up emitted keys whose startTime has passed (no longer in activation window)
+        for (const key of activatingEmitted) {
+          const doc = activating.find((d) => d._id.toString() === key);
+          if (!doc) {
+            activatingEmitted.delete(key);
+          }
+        }
+
+        // 2. Expiry scan — mark accepted schedules as expired if startTime + durationMinutes <= now
+        const acceptedSchedules = await schedulesCollection
+          .find({ status: "accepted" })
+          .toArray();
+
+        for (const doc of acceptedSchedules) {
+          const expiryTime =
+            new Date(doc.startTime).getTime() + doc.durationMinutes * 60_000;
+          if (expiryTime <= now.getTime()) {
+            const updatedAt = now.toISOString();
+            await schedulesCollection.updateOne(
+              { _id: doc._id },
+              { $set: { status: "expired", updatedAt } }
+            );
+            const payload = {
+              scheduleId: doc._id.toString(),
+              conversationId: doc.conversationId.toString(),
+            };
+            io.to(`user:${doc.schedulerEmail}`).emit("schedule:expired", payload);
+            io.to(`user:${doc.inviteeEmail}`).emit("schedule:expired", payload);
+            // Remove from activating set if present
+            activatingEmitted.delete(doc._id.toString());
+          }
+        }
+      } catch (err) {
+        console.error("[Scheduler] Error:", err.message);
+      }
+    };
+
+    // Run once on startup to handle schedules that expired while server was offline
+    runExpiryAndActivationScan();
+
+    // Then run every 30 seconds
+    setInterval(runExpiryAndActivationScan, 30_000);
+
     registerAiAdvisorRoutes(app, {
       usersCollection,
       conversationsCollection,
       messagesCollection,
       aiAdvisorSessionsCollection,
     });
-    registerCvParserRoutes(app);
 
-    // ── Users ─────────────────────────────────────────────────────────────
-    app.get("/users", async (req, res) => {
-      try {
-        const users = await usersCollection
-          .find({})
-          .sort({ fullName: 1 })
-          .limit(100)
-          .toArray();
-        res.json(users);
-      } catch (error) {
-        res.status(500).json({ message: "Failed to fetch users" });
-      }
+    initVectorStore()
+      .then((store) => {
+        if (store) console.log("[AI Advisor] Vector store ready");
+      })
+      .catch((err) => {
+        console.warn("[AI Advisor] Vector store warmup skipped:", err.message);
+      });
+
+    const buildConnectionPayload = (userDoc) => ({
+      uid: userDoc._id,
+      email: userDoc.email,
+      fullName: userDoc.fullName || userDoc.name || "Unknown",
+      profileImage: userDoc.profileImage || userDoc.image || "",
     });
 
-    app.post("/users", async (req, res) => {
-      try {
-        const doc = { ...req.body, createdAt: new Date().toISOString() };
-        const result = await usersCollection.insertOne(doc);
-        res.status(201).json({ _id: result.insertedId, ...doc });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to create user" });
-      }
+    const toPublicRequest = (requestDoc, viewerEmail) => ({
+      requestId: requestDoc._id,
+      senderEmail: requestDoc.senderEmail,
+      senderUid: requestDoc.senderUid,
+      senderName: requestDoc.senderName,
+      senderImage: requestDoc.senderImage,
+      receiverEmail: requestDoc.receiverEmail,
+      status: requestDoc.status,
+      createdAt: requestDoc.createdAt,
+      isOutgoing: requestDoc.senderEmail === viewerEmail,
     });
 
-    app.patch("/users/:id", verifyJWT, async (req, res) => {
-      try {
-        const id = req.params.id;
-        const filter = ObjectId.isValid(id) && id.length === 24
-          ? { _id: new ObjectId(id) }
-          : { email: id.toLowerCase() };
-        const targetUser = await usersCollection.findOne(filter);
-        if (!targetUser) {
-          return res.status(404).json({ message: "User not found" });
-        }
-        if (req.user.email.toLowerCase() !== targetUser.email.toLowerCase()) {
-          return res.status(403).json({ message: "Access denied" });
-        }
-        await usersCollection.updateOne(filter, { $set: req.body });
-        res.json({ message: "User updated" });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to update user" });
+    const getParticipantsKey = (emailA, emailB) =>
+      [emailA, emailB].sort().join("__");
+
+    const isConnectedPair = async (emailA, emailB) => {
+      const user = await usersCollection.findOne(
+        { email: emailA },
+        { projection: { connections: 1 } },
+      );
+      return (user?.connections || []).some((c) => c.email === emailB);
+    };
+
+    const ensureConversationMembership = async (conversationId, email) => {
+      const conversation = await conversationsCollection.findOne(
+        { _id: new ObjectId(conversationId) },
+        { projection: { participants: 1 } },
+      );
+      if (!conversation) return { conversation: null, otherEmail: null };
+      if (!conversation.participants.includes(email)) {
+        return { conversation: null, otherEmail: null };
       }
+      const otherEmail = conversation.participants.find((p) => p !== email);
+      return { conversation, otherEmail };
+    };
+
+    const formatConversation = (conversation, peer, currentUserEmail) => ({
+      _id: conversation._id.toString(),
+      participants: conversation.participants,
+      peer: {
+        email: peer?.email,
+        fullName: peer?.fullName || peer?.name || "Unknown",
+        profileImage: peer?.profileImage || peer?.image || "",
+      },
+      lastMessage: conversation.lastMessage || null,
+      lastMessageAt: conversation.lastMessageAt || conversation.createdAt,
+      unreadCount: conversation.unreadCounts?.[currentUserEmail] || 0,
+      createdAt: conversation.createdAt,
+      updatedAt: conversation.updatedAt,
     });
 
-    app.get("/experts/:identifier", async (req, res) => {
-      try {
-        const identifier = req.params.identifier;
-        const filter = ObjectId.isValid(identifier) && identifier.length === 24
-          ? { _id: new ObjectId(identifier) }
-          : { email: identifier.toLowerCase() };
-        const expert = await usersCollection.findOne(filter);
-        if (!expert) {
-          return res.status(404).json({ message: "Expert not found" });
-        }
-        res.json(expert);
-      } catch (error) {
-        res.status(500).json({ message: "Failed to fetch expert" });
-      }
+    const serializeMessage = (message) => ({
+      ...message,
+      _id: message._id.toString(),
+      conversationId: message.conversationId.toString(),
     });
 
-    app.get("/find-mentors", async (req, res) => {
-      const { learnSkills = "[]" } = req.query;
-      let targetSkills = [];
-      try {
-        targetSkills = JSON.parse(learnSkills);
-      } catch {
-        targetSkills = [];
-      }
-      const normalized = targetSkills.map(normalize);
-      try {
-        const candidates = await usersCollection
-          .find({ teachSkills: { $exists: true, $ne: [] } })
-          .limit(80)
-          .toArray();
-        const results = candidates
-          .map((user) => {
-            const teach = (user.teachSkills || []).map(normalize);
-            const matches = normalized.filter((s) => teach.includes(s));
-            return {
-              _id: user._id,
-              fullName: user.fullName,
-              email: user.email,
-              teachSkills: user.teachSkills,
-              matchCount: matches.length,
-            };
-          })
-          .filter((u) => u.matchCount > 0)
-          .sort((a, b) => b.matchCount - a.matchCount)
-          .slice(0, 10);
-        res.json(results);
-      } catch (error) {
-        res.status(500).json({ message: "Failed to find mentors" });
-      }
-    });
+    const createMessage = async ({
+      conversationId,
+      senderEmail,
+      text,
+      imageData,
+    }) => {
+      const cleanText = (text || "").trim();
+      const cleanImageData = imageData || "";
+      const hasImage = cleanImageData.startsWith("data:image/");
 
-    // ── Connections ───────────────────────────────────────────────────────
-    app.post("/connections/requests", verifyJWT, async (req, res) => {
-      const { receiverEmail } = req.body;
-      if (!receiverEmail) {
-        return res.status(400).json({ message: "receiverEmail is required" });
+      if (!cleanText && !hasImage) {
+        throw new Error("Message cannot be empty");
       }
-      try {
-        const result = await connectionRequestsCollection.insertOne({
-          senderEmail: req.user.email,
-          receiverEmail,
-          status: "pending",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        });
-        res.json({ acknowledged: result.acknowledged });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to send request" });
-      }
-    });
 
-    app.get("/connections/requests/incoming", verifyJWT, async (req, res) => {
-      try {
-        const requests = await connectionRequestsCollection
-          .find({ receiverEmail: req.user.email, status: "pending" })
-          .toArray();
-        res.json(requests);
-      } catch (error) {
-        res.status(500).json({ message: "Failed to fetch requests" });
+      if (hasImage && cleanImageData.length > 2_000_000) {
+        throw new Error("Image is too large");
       }
-    });
 
-    app.get("/connections/requests/status", async (req, res) => {
-      const { user1, user2 } = req.query;
-      try {
-        const request = await connectionRequestsCollection.findOne({
-          $or: [
-            { senderEmail: user1, receiverEmail: user2 },
-            { senderEmail: user2, receiverEmail: user1 },
-          ],
-        });
-        res.json({ status: request?.status || "none" });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to fetch status" });
+      const { conversation, otherEmail } = await ensureConversationMembership(
+        conversationId,
+        senderEmail,
+      );
+      if (!conversation || !otherEmail) {
+        throw new Error("You are not allowed to message in this conversation");
       }
-    });
 
-    app.patch("/connections/requests/respond", verifyJWT, async (req, res) => {
-      const { senderEmail, action } = req.body;
-      const status = action === "accept" ? "accepted" : "rejected";
-      try {
-        const result = await connectionRequestsCollection.updateOne(
-          { senderEmail, receiverEmail: req.user.email, status: "pending" },
-          { $set: { status, updatedAt: new Date().toISOString() } },
-        );
-        if (status === "accepted") {
-          await usersCollection.updateOne(
-            { email: senderEmail },
-            { $push: { connections: { email: req.user.email, connectedAt: new Date().toISOString() } } },
-          );
-          await usersCollection.updateOne(
-            { email: req.user.email },
-            { $push: { connections: { email: senderEmail, connectedAt: new Date().toISOString() } } },
-          );
-        }
-        res.json({ message: "Request updated", modified: result.modifiedCount });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to respond to request" });
+      const stillConnected = await isConnectedPair(senderEmail, otherEmail);
+      if (!stillConnected) {
+        throw new Error("You can only message connected users");
       }
-    });
 
-    app.delete("/connections/requests/cancel", verifyJWT, async (req, res) => {
-      const { receiverEmail } = req.query;
-      try {
-        await connectionRequestsCollection.deleteOne({
-          senderEmail: req.user.email,
-          receiverEmail,
-          status: "pending",
-        });
-        res.json({ message: "Request cancelled" });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to cancel request" });
-      }
-    });
+      const receiverOnline = onlineUsers.has(otherEmail);
+      const now = new Date().toISOString();
+      const messageDoc = {
+        conversationId: conversation._id,
+        senderEmail,
+        receiverEmail: otherEmail,
+        text: cleanText,
+        imageData: hasImage ? cleanImageData : "",
+        status: receiverOnline ? "delivered" : "sent",
+        createdAt: now,
+        updatedAt: now,
+        seenAt: null,
+      };
 
-    // ── Conversations & messages ──────────────────────────────────────────
-    app.get("/conversations", verifyJWT, async (req, res) => {
-      try {
-        const conversations = await conversationsCollection
-          .find({ participants: req.user.email })
-          .sort({ lastMessageAt: -1 })
-          .toArray();
-        res.json(conversations);
-      } catch (error) {
-        res.status(500).json({ message: "Failed to fetch conversations" });
-      }
-    });
+      const insertResult = await messagesCollection.insertOne(messageDoc);
+      const fullMessage = {
+        ...messageDoc,
+        _id: insertResult.insertedId,
+      };
 
-    app.post("/conversations/open", verifyJWT, async (req, res) => {
-      const { otherEmail } = req.body;
-      const participants = [req.user.email, otherEmail].sort();
-      try {
-        let conversation = await conversationsCollection.findOne({ participants });
-        if (!conversation) {
-          conversation = {
-            participants,
-            createdAt: new Date().toISOString(),
-            lastMessageAt: new Date().toISOString(),
-          };
-          const result = await conversationsCollection.insertOne(conversation);
-          conversation = { _id: result.insertedId, ...conversation };
-        }
-        res.json(conversation);
-      } catch (error) {
-        res.status(500).json({ message: "Failed to open conversation" });
-      }
-    });
+      await conversationsCollection.updateOne(
+        { _id: conversation._id },
+        {
+          $set: {
+            lastMessage: {
+              text: cleanText || (hasImage ? "Image" : ""),
+              senderEmail,
+              createdAt: now,
+            },
+            lastMessageAt: now,
+            updatedAt: now,
+          },
+          $inc: {
+            [`unreadCounts.${otherEmail}`]: 1,
+          },
+        },
+      );
 
-    app.get("/conversations/:id/messages", verifyJWT, async (req, res) => {
-      try {
-        const messages = await messagesCollection
-          .find({ conversationId: req.params.id })
-          .sort({ createdAt: 1 })
-          .toArray();
-        res.json(messages);
-      } catch (error) {
-        res.status(500).json({ message: "Failed to fetch messages" });
-      }
-    });
+      const serialized = serializeMessage(fullMessage);
+      io.to(`conversation:${conversation._id.toString()}`).emit(
+        "message:new",
+        serialized,
+      );
+      io.to(`user:${senderEmail}`).emit("conversation:updated");
+      io.to(`user:${otherEmail}`).emit("conversation:updated");
 
-    app.post("/conversations/:id/messages", verifyJWT, async (req, res) => {
-      try {
-        const doc = {
-          conversationId: req.params.id,
-          senderEmail: req.user.email,
-          text: req.body.text,
-          createdAt: new Date().toISOString(),
-        };
-        const result = await messagesCollection.insertOne(doc);
+      return serialized;
+    };
+
+    const rebuildConversationLastMessage = async (conversationObjectId) => {
+      const latestMessage = await messagesCollection.findOne(
+        { conversationId: conversationObjectId },
+        { sort: { createdAt: -1 } },
+      );
+
+      if (!latestMessage) {
         await conversationsCollection.updateOne(
-          { _id: new ObjectId(req.params.id) },
-          { $set: { lastMessageAt: doc.createdAt } },
+          { _id: conversationObjectId },
+          {
+            $set: {
+              lastMessage: null,
+              lastMessageAt: null,
+              updatedAt: new Date().toISOString(),
+            },
+          },
         );
-        io.to(`conversation:${req.params.id}`).emit("message:new", {
-          _id: result.insertedId,
-          ...doc,
-        });
-        res.status(201).json({ _id: result.insertedId, ...doc });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to send message" });
+        return;
       }
-    });
 
-    app.patch("/conversations/:id/seen", verifyJWT, async (req, res) => {
-      try {
-        await messagesCollection.updateMany(
-          { conversationId: req.params.id, senderEmail: { $ne: req.user.email } },
-          { $set: { seen: true } },
-        );
-        res.json({ message: "Marked as seen" });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to mark seen" });
-      }
-    });
+      await conversationsCollection.updateOne(
+        { _id: conversationObjectId },
+        {
+          $set: {
+            lastMessage: {
+              text: latestMessage.text || (latestMessage.imageData ? "Image" : ""),
+              senderEmail: latestMessage.senderEmail,
+              createdAt: latestMessage.createdAt,
+            },
+            lastMessageAt: latestMessage.createdAt,
+            updatedAt: new Date().toISOString(),
+          },
+        },
+      );
+    };
 
-    // ── Ratings ───────────────────────────────────────────────────────────
-    app.post("/ratings", verifyJWT, async (req, res) => {
-      const { ratedUserEmail, score, comment } = req.body;
-      try {
-        const result = await ratingsCollection.insertOne({
-          raterEmail: req.user.email,
-          ratedUserEmail,
-          score,
-          comment,
-          createdAt: new Date().toISOString(),
-        });
-        res.status(201).json({ _id: result.insertedId });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to submit rating" });
-      }
-    });
-
-    app.get("/ratings/summary", async (req, res) => {
-      const { email } = req.query;
-      try {
-        const ratings = await ratingsCollection
-          .find({ ratedUserEmail: email })
-          .toArray();
-        const total = ratings.length;
-        const average = total
-          ? ratings.reduce((sum, r) => sum + (r.score || 0), 0) / total
-          : 0;
-        res.json({ total, average: Math.round(average * 10) / 10 });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to fetch ratings" });
-      }
-    });
-
-    // ── Platform stats ────────────────────────────────────────────────────
-    app.get("/platform-stats", async (_req, res) => {
-      try {
-        const [users, conversations, messages] = await Promise.all([
-          usersCollection.countDocuments(),
-          conversationsCollection.countDocuments(),
-          messagesCollection.countDocuments(),
-        ]);
-        res.json({ users, conversations, messages });
-      } catch (error) {
-        res.status(500).json({ message: "Failed to fetch stats" });
-      }
-    });
-
-    // ── Real-time presence, chat & RTC ────────────────────────────────────
     io.on("connection", (socket) => {
       socket.on("presence:join", ({ email }) => {
         if (!email) return;
-        onlineUsers.set(email, socket.id);
         socket.data.email = email;
         socket.join(`user:${email}`);
+        if (!onlineUsers.has(email)) {
+          onlineUsers.set(email, new Set());
+        }
+        onlineUsers.get(email).add(socket.id);
         emitOnlineUsers();
       });
 
       socket.on("presence:leave", ({ email }) => {
-        onlineUsers.delete(email);
+        const targetEmail = email || socket.data?.email;
+        if (!targetEmail || !onlineUsers.has(targetEmail)) return;
+        const socketSet = onlineUsers.get(targetEmail);
+        socketSet.delete(socket.id);
+        if (socketSet.size === 0) {
+          onlineUsers.delete(targetEmail);
+        }
         emitOnlineUsers();
       });
 
-      socket.on("conversation:join", ({ conversationId }) => {
-        socket.join(`conversation:${conversationId}`);
+      socket.on("conversation:join", async ({ conversationId, email }) => {
+        try {
+          if (!conversationId || !email) return;
+          const { conversation } = await ensureConversationMembership(
+            conversationId,
+            email,
+          );
+          if (!conversation) return;
+          socket.join(`conversation:${conversationId}`);
+        } catch (error) {
+          // ignore socket room join errors to avoid crashing realtime channel
+        }
       });
 
       socket.on("message:send", async (payload, callback) => {
         try {
-          const { conversationId, text } = payload || {};
-          if (!conversationId || !text) return;
-          const doc = {
-            conversationId,
-            senderEmail: socket.data.email,
-            text,
-            createdAt: new Date().toISOString(),
-          };
-          const result = await messagesCollection.insertOne(doc);
-          await conversationsCollection.updateOne(
-            { _id: new ObjectId(conversationId) },
-            { $set: { lastMessageAt: doc.createdAt } },
-          );
-          const message = { _id: result.insertedId, ...doc };
-          io.to(`conversation:${conversationId}`).emit("message:new", message);
+          const message = await createMessage(payload);
           if (callback) callback({ ok: true, message });
         } catch (error) {
           if (callback) callback({ ok: false, error: error.message });
@@ -469,13 +584,128 @@ async function run() {
       });
 
       socket.on("message:seen", async ({ conversationId, viewerEmail }) => {
-        await messagesCollection.updateMany(
-          { conversationId, senderEmail: { $ne: viewerEmail } },
-          { $set: { seen: true } },
-        );
+        try {
+          if (!conversationId || !viewerEmail) return;
+          const { conversation, otherEmail } = await ensureConversationMembership(
+            conversationId,
+            viewerEmail,
+          );
+          if (!conversation || !otherEmail) return;
+
+          const now = new Date().toISOString();
+          await messagesCollection.updateMany(
+            {
+              conversationId: conversation._id,
+              receiverEmail: viewerEmail,
+              seenAt: null,
+            },
+            { $set: { seenAt: now, status: "seen", updatedAt: now } },
+          );
+
+          await conversationsCollection.updateOne(
+            { _id: conversation._id },
+            {
+              $set: {
+                [`unreadCounts.${viewerEmail}`]: 0,
+                updatedAt: now,
+              },
+            },
+          );
+
+          io.to(`conversation:${conversationId}`).emit("message:seen", {
+            conversationId,
+            viewerEmail,
+            seenAt: now,
+          });
+          io.to(`user:${viewerEmail}`).emit("conversation:updated");
+          io.to(`user:${otherEmail}`).emit("conversation:updated");
+        } catch (error) {
+          // silently ignore
+        }
+      });
+
+      socket.on("message:edit", async (payload, callback) => {
+        try {
+          const { messageId, editorEmail, text } = payload || {};
+          const cleanText = (text || "").trim();
+          if (!ObjectId.isValid(messageId) || !editorEmail) {
+            throw new Error("Invalid message edit payload");
+          }
+
+          const message = await messagesCollection.findOne({
+            _id: new ObjectId(messageId),
+          });
+          if (!message || message.senderEmail !== editorEmail) {
+            throw new Error("You can only edit your own message");
+          }
+          if (!cleanText && !message.imageData) {
+            throw new Error("Message text cannot be empty");
+          }
+
+          const now = new Date().toISOString();
+          await messagesCollection.updateOne(
+            { _id: message._id },
+            {
+              $set: {
+                text: cleanText,
+                updatedAt: now,
+                isEdited: true,
+              },
+            },
+          );
+
+          await rebuildConversationLastMessage(message.conversationId);
+          const updated = serializeMessage({
+            ...message,
+            text: cleanText,
+            updatedAt: now,
+            isEdited: true,
+          });
+
+          io.to(`conversation:${updated.conversationId}`).emit(
+            "message:edited",
+            updated,
+          );
+          io.to(`user:${message.senderEmail}`).emit("conversation:updated");
+          io.to(`user:${message.receiverEmail}`).emit("conversation:updated");
+          if (callback) callback({ ok: true, message: updated });
+        } catch (error) {
+          if (callback) callback({ ok: false, error: error.message });
+        }
+      });
+
+      socket.on("message:delete", async (payload, callback) => {
+        try {
+          const { messageId, requesterEmail } = payload || {};
+          if (!ObjectId.isValid(messageId) || !requesterEmail) {
+            throw new Error("Invalid delete payload");
+          }
+
+          const message = await messagesCollection.findOne({
+            _id: new ObjectId(messageId),
+          });
+          if (!message || message.senderEmail !== requesterEmail) {
+            throw new Error("You can only delete your own message");
+          }
+
+          await messagesCollection.deleteOne({ _id: message._id });
+          await rebuildConversationLastMessage(message.conversationId);
+
+          const conversationId = message.conversationId.toString();
+          io.to(`conversation:${conversationId}`).emit("message:deleted", {
+            messageId,
+            conversationId,
+          });
+          io.to(`user:${message.senderEmail}`).emit("conversation:updated");
+          io.to(`user:${message.receiverEmail}`).emit("conversation:updated");
+          if (callback) callback({ ok: true });
+        } catch (error) {
+          if (callback) callback({ ok: false, error: error.message });
+        }
       });
 
       socket.on("rtc:offer", ({ to, offer, scheduleId }) => {
+        if (!to || !offer) return;
         io.to(`user:${to}`).emit("rtc:offer", {
           from: socket.data.email,
           offer,
@@ -484,6 +714,7 @@ async function run() {
       });
 
       socket.on("rtc:answer", ({ to, answer, scheduleId }) => {
+        if (!to || !answer) return;
         io.to(`user:${to}`).emit("rtc:answer", {
           from: socket.data.email,
           answer,
@@ -491,36 +722,1411 @@ async function run() {
         });
       });
 
-      socket.on("rtc:ice-candidate", ({ to, candidate, scheduleId }) => {
+      socket.on("rtc:ice-candidate", ({ to, candidate }) => {
+        if (!to || !candidate) return;
         io.to(`user:${to}`).emit("rtc:ice-candidate", {
           from: socket.data.email,
           candidate,
-          scheduleId,
         });
       });
 
       socket.on("rtc:end", ({ to, scheduleId }) => {
-        io.to(`user:${to}`).emit("rtc:end", {
+        if (!to) return;
+        io.to(`user:${to}`).emit("rtc:ended", {
           from: socket.data.email,
           scheduleId,
         });
       });
 
       socket.on("disconnect", () => {
-        if (socket.data.email) onlineUsers.delete(socket.data.email);
+        const email = socket.data?.email;
+        if (!email || !onlineUsers.has(email)) return;
+        const socketSet = onlineUsers.get(email);
+        socketSet.delete(socket.id);
+        if (socketSet.size === 0) {
+          onlineUsers.delete(email);
+        }
         emitOnlineUsers();
       });
     });
 
-    httpServer.listen(port, () => {
-      console.log(`[Server] running on port ${port}`);
+    // ===== patch user profile =====
+
+    // Fields that must never be overwritten by a client PATCH request
+    const PROFILE_FIELD_BLOCKLIST = new Set([
+      "_id", "email", "uid", "connections", "isDeactivated",
+      "role_system", "createdAt", "mongoId",
+    ]);
+
+    // Only these fields are accepted in a profile update
+    const PROFILE_ALLOWED_FIELDS = new Set([
+      "fullName", "username", "profileImage", "profileImagePublicId",
+      "headline", "bio", "role",
+      "education", "location", "website", "github", "linkedin", "portfolio",
+      "teachSkills", "learnSkills", "teachLevel", "learnLevel",
+      "projects", "certificates",
+    ]);
+
+    app.patch("/users/:id", verifyJWT, async (req, res) => {
+      try {
+        const id = req.params.id;
+
+        // ── 1. Resolve the target document ──────────────────────────────────
+        let filter;
+        if (ObjectId.isValid(id) && id.length === 24) {
+          filter = { _id: new ObjectId(id) };
+        } else {
+          // id is an email string
+          filter = { email: id.toLowerCase() };
+        }
+
+        const targetUser = await usersCollection.findOne(filter, {
+          projection: { email: 1, _id: 1, profileImagePublicId: 1 },
+        });
+
+        if (!targetUser) {
+          return res.status(404).json({
+            success: false,
+            message: "User not found. The profile you are trying to update does not exist.",
+          });
+        }
+
+        // Preserve old Cloudinary public_id before overwriting it
+        const oldPublicId = targetUser.profileImagePublicId || null;
+
+        // ── 2. Authorization: only the owner may update their own profile ──
+        const requestorEmail = req.user.email.toLowerCase();
+        const targetEmail = targetUser.email?.toLowerCase();
+
+        if (requestorEmail !== targetEmail) {
+          return res.status(403).json({
+            success: false,
+            message: "Access denied. You can only update your own profile.",
+          });
+        }
+
+        // ── 3. Build a safe, allowlisted update payload ──────────────────
+        const rawBody = req.body || {};
+        const sanitized = {};
+
+        for (const [key, value] of Object.entries(rawBody)) {
+          if (PROFILE_FIELD_BLOCKLIST.has(key)) continue;       // hard block
+          if (!PROFILE_ALLOWED_FIELDS.has(key)) continue;       // allowlist
+          sanitized[key] = value;
+        }
+
+        if (Object.keys(sanitized).length === 0) {
+          return res.status(400).json({
+            success: false,
+            message: "No valid fields provided for update.",
+          });
+        }
+
+        // ── 4. Strip base64 binary data from certificates to keep doc small ─
+        if (Array.isArray(sanitized.certificates)) {
+          sanitized.certificates = sanitized.certificates.map((cert) => {
+            const { fileUrl, ...rest } = cert;
+            // Only persist the fileUrl if it's a real URL (not base64 data)
+            const isUrl = typeof fileUrl === "string" &&
+              (fileUrl.startsWith("http://") || fileUrl.startsWith("https://"));
+            return isUrl ? { ...rest, fileUrl } : rest;
+          });
+        }
+
+        // ── 5. Perform the update ────────────────────────────────────────
+        const now = new Date().toISOString();
+        const updateDoc = { $set: { ...sanitized, updatedAt: now } };
+
+        const result = await usersCollection.updateOne(
+          { _id: targetUser._id },
+          updateDoc
+        );
+
+        if (result.matchedCount === 0) {
+          // DB found no document — clean up the newly uploaded Cloudinary image
+          // to prevent orphaned storage.
+          const newPublicId = sanitized.profileImagePublicId;
+          if (newPublicId && newPublicId !== oldPublicId) {
+            deleteCloudinaryImage(newPublicId).catch((err) =>
+              console.error("[PATCH /users/:id] Failed to clean up orphaned Cloudinary image:", err.message)
+            );
+          }
+          return res.status(404).json({
+            success: false,
+            message: "User not found during update.",
+          });
+        }
+
+        // ── 6. After successful DB update, delete the OLD Cloudinary image ──
+        // Fire-and-forget: failure here must not break the response.
+        const newPublicId = sanitized.profileImagePublicId;
+        if (oldPublicId && newPublicId && oldPublicId !== newPublicId) {
+          deleteCloudinaryImage(oldPublicId)
+            .then(() =>
+              console.log("[PATCH /users/:id] Deleted old Cloudinary image:", oldPublicId)
+            )
+            .catch((err) =>
+              console.error("[PATCH /users/:id] Old Cloudinary image deletion failed (non-critical):", err.message)
+            );
+        }
+
+        // ── 7. Return the freshly-updated document ───────────────────────
+        const updatedUser = await usersCollection.findOne(
+          { _id: targetUser._id },
+          {
+            projection: {
+              fullName: 1, username: 1, profileImage: 1, profileImagePublicId: 1,
+              headline: 1, bio: 1,
+              role: 1, education: 1, location: 1, website: 1, github: 1,
+              linkedin: 1, portfolio: 1, teachSkills: 1, learnSkills: 1,
+              teachLevel: 1, learnLevel: 1, projects: 1, certificates: 1,
+              email: 1, updatedAt: 1, createdAt: 1,
+            },
+          }
+        );
+
+        const { calculateProfileCompletion } = require("./utils/profileCompletion");
+        const profileCompletion = calculateProfileCompletion(updatedUser);
+
+        return res.status(200).json({
+          success: true,
+          message: "Profile updated successfully.",
+          data: {
+            ...updatedUser,
+            profileCompletion,
+          },
+        });
+      } catch (error) {
+        console.error("[PATCH /users/:id] Error:", error.message);
+        // If a new Cloudinary image was uploaded but the DB threw, clean it up
+        const newPublicId = req.body?.profileImagePublicId;
+        if (newPublicId) {
+          deleteCloudinaryImage(newPublicId).catch((err) =>
+            console.error("[PATCH /users/:id] Failed to clean up Cloudinary image after DB error:", err.message)
+          );
+        }
+        return res.status(500).json({
+          success: false,
+          message: "An unexpected error occurred while updating your profile. Please try again.",
+        });
+      }
     });
+
+    app.post("/connections/requests", verifyJWT, async (req, res) => {
+      const {
+        senderEmail,
+        senderUid,
+        senderName,
+        senderImage,
+        receiverEmail,
+        receiverUid,
+      } = req.body;
+
+      if (!senderEmail || !receiverEmail) {
+        return res
+          .status(400)
+          .send({ message: "senderEmail and receiverEmail are required" });
+      }
+
+      if (senderEmail === receiverEmail) {
+        return res
+          .status(400)
+          .send({ message: "You cannot send request to yourself" });
+      }
+
+      try {
+        const [senderUser, receiverUser] = await Promise.all([
+          usersCollection.findOne({ email: senderEmail }),
+          usersCollection.findOne({ email: receiverEmail }),
+        ]);
+
+        if (!senderUser || !receiverUser) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        const alreadyConnected = (senderUser.connections || []).some(
+          (connection) => connection.email === receiverEmail,
+        );
+        if (alreadyConnected) {
+          return res.status(409).send({ message: "Already connected" });
+        }
+
+        const pendingFromSender = await connectionRequestsCollection.findOne({
+          senderEmail,
+          receiverEmail,
+          status: "pending",
+        });
+        if (pendingFromSender) {
+          return res.status(409).send({
+            message: "Request already sent",
+            status: "sent",
+            requestId: pendingFromSender._id,
+          });
+        }
+
+        const reversePending = await connectionRequestsCollection.findOne({
+          senderEmail: receiverEmail,
+          receiverEmail: senderEmail,
+          status: "pending",
+        });
+        if (reversePending) {
+          return res.status(409).send({
+            message: "You already have an incoming request from this user",
+            status: "received",
+            requestId: reversePending._id,
+          });
+        }
+
+        const now = new Date().toISOString();
+        const requestDoc = {
+          senderEmail,
+          senderUid: senderUid || senderUser.uid || senderUser._id,
+          senderName:
+            senderName || senderUser.fullName || senderUser.name || "Anonymous",
+          senderImage:
+            senderImage ||
+            senderUser.profileImage ||
+            senderUser.image ||
+            "https://i.ibb.co/4pDNDk1/avatar.png",
+          receiverEmail,
+          receiverUid: receiverUid || receiverUser.uid || receiverUser._id,
+          status: "pending",
+          createdAt: now,
+          updatedAt: now,
+        };
+
+        const result = await connectionRequestsCollection.insertOne(requestDoc);
+        io.to(`user:${senderEmail}`).emit("connections:updated");
+        io.to(`user:${receiverEmail}`).emit("connections:updated");
+        return res.send({
+          acknowledged: result.acknowledged,
+          request: { ...requestDoc, _id: result.insertedId },
+        });
+      } catch (error) {
+        if (error?.code === 11000) {
+          return res.status(409).send({ message: "Request already exists" });
+        }
+        return res.status(500).send({ message: "Failed to send request" });
+      }
+    });
+
+    app.delete("/connections/requests/cancel", verifyJWT, async (req, res) => {
+      const { senderEmail, receiverEmail } = req.body;
+
+      if (!senderEmail || !receiverEmail) {
+        return res
+          .status(400)
+          .send({ message: "senderEmail and receiverEmail are required" });
+      }
+
+      try {
+        const result = await connectionRequestsCollection.deleteOne({
+          senderEmail,
+          receiverEmail,
+          status: "pending",
+        });
+
+        if (result.deletedCount === 0) {
+          return res.status(404).send({ message: "No pending request found" });
+        }
+
+        io.to(`user:${senderEmail}`).emit("connections:updated");
+        io.to(`user:${receiverEmail}`).emit("connections:updated");
+        return res.send({ message: "Request cancelled", deletedCount: 1 });
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to cancel request" });
+      }
+    });
+
+    app.patch("/connections/requests/respond", verifyJWT, async (req, res) => {
+      const { senderEmail, receiverEmail, action, responderEmail } = req.body;
+
+      if (!senderEmail || !receiverEmail || !responderEmail || !action) {
+        return res.status(400).send({
+          message:
+            "senderEmail, receiverEmail, responderEmail and action are required",
+        });
+      }
+
+      if (!["accept", "reject"].includes(action)) {
+        return res.status(400).send({ message: "Invalid action" });
+      }
+
+      if (responderEmail !== receiverEmail) {
+        return res
+          .status(403)
+          .send({ message: "Only receiver can accept or reject" });
+      }
+
+      try {
+        const requestDoc = await connectionRequestsCollection.findOne({
+          senderEmail,
+          receiverEmail,
+          status: "pending",
+        });
+
+        if (!requestDoc) {
+          return res.status(404).send({ message: "Pending request not found" });
+        }
+
+        if (action === "reject") {
+          await connectionRequestsCollection.deleteOne({ _id: requestDoc._id });
+          io.to(`user:${senderEmail}`).emit("connections:updated");
+          io.to(`user:${receiverEmail}`).emit("connections:updated");
+          return res.send({ message: "Request rejected", status: "rejected" });
+        }
+
+        const [senderUser, receiverUser] = await Promise.all([
+          usersCollection.findOne({ email: senderEmail }),
+          usersCollection.findOne({ email: receiverEmail }),
+        ]);
+
+        if (!senderUser || !receiverUser) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        const senderConnection = buildConnectionPayload(receiverUser);
+        const receiverConnection = buildConnectionPayload(senderUser);
+
+        await Promise.all([
+          usersCollection.updateOne(
+            { email: senderEmail },
+            { $addToSet: { connections: senderConnection } },
+          ),
+          usersCollection.updateOne(
+            { email: receiverEmail },
+            { $addToSet: { connections: receiverConnection } },
+          ),
+        ]);
+
+        await connectionRequestsCollection.deleteOne({ _id: requestDoc._id });
+        io.to(`user:${senderEmail}`).emit("connections:updated");
+        io.to(`user:${receiverEmail}`).emit("connections:updated");
+
+        return res.send({
+          message: "Request accepted and connection created",
+          status: "connected",
+        });
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to process request" });
+      }
+    });
+
+    app.get("/connections/requests/incoming", verifyJWT, async (req, res) => {
+      const { email } = req.query;
+
+      if (!email) {
+        return res.status(400).send({ message: "email is required" });
+      }
+
+      try {
+        const requests = await connectionRequestsCollection
+          .find({ receiverEmail: email, status: "pending" })
+          .sort({ createdAt: -1 })
+          .toArray();
+
+        return res.send(requests.map((request) => toPublicRequest(request, email)));
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to fetch requests" });
+      }
+    });
+
+    app.get("/connections/requests/status", async (req, res) => {
+      const { email } = req.query;
+
+      if (!email) {
+        return res.status(400).send({ message: "email is required" });
+      }
+
+      try {
+        const requests = await connectionRequestsCollection
+          .find({
+            status: "pending",
+            $or: [{ senderEmail: email }, { receiverEmail: email }],
+          })
+          .toArray();
+
+        return res.send(requests.map((request) => toPublicRequest(request, email)));
+      } catch (error) {
+        return res
+          .status(500)
+          .send({ message: "Failed to fetch request statuses" });
+      }
+    });
+
+    app.post("/conversations/open", verifyJWT, async (req, res) => {
+      const { requesterEmail, peerEmail } = req.body;
+
+      if (!requesterEmail || !peerEmail) {
+        return res
+          .status(400)
+          .send({ message: "requesterEmail and peerEmail are required" });
+      }
+      if (requesterEmail === peerEmail) {
+        return res
+          .status(400)
+          .send({ message: "Cannot start conversation with yourself" });
+      }
+
+      try {
+        const [requesterUser, peerUser] = await Promise.all([
+          usersCollection.findOne({ email: requesterEmail }),
+          usersCollection.findOne({ email: peerEmail }),
+        ]);
+        if (!requesterUser || !peerUser) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        const connected = await isConnectedPair(requesterEmail, peerEmail);
+        if (!connected) {
+          return res
+            .status(403)
+            .send({ message: "Only connected users can open conversation" });
+        }
+
+        const participants = [requesterEmail, peerEmail].sort();
+        const participantsKey = getParticipantsKey(requesterEmail, peerEmail);
+        const now = new Date().toISOString();
+
+        await conversationsCollection.updateOne(
+          { participantsKey },
+          {
+            $setOnInsert: {
+              participants,
+              participantsKey,
+              createdAt: now,
+              updatedAt: now,
+              unreadCounts: {
+                [requesterEmail]: 0,
+                [peerEmail]: 0,
+              },
+            },
+          },
+          { upsert: true },
+        );
+
+        const conversation = await conversationsCollection.findOne({
+          participantsKey,
+        });
+
+        return res.send(formatConversation(conversation, peerUser, requesterEmail));
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to open conversation" });
+      }
+    });
+
+    app.get("/conversations", verifyJWT, async (req, res) => {
+      const { email } = req.query;
+      if (!email) {
+        return res.status(400).send({ message: "email is required" });
+      }
+
+      try {
+        const conversations = await conversationsCollection
+          .find({ participants: email })
+          .sort({ lastMessageAt: -1, updatedAt: -1 })
+          .toArray();
+
+        if (conversations.length === 0) {
+          return res.send([]);
+        }
+
+        const peerEmails = [
+          ...new Set(
+            conversations.map((c) => c.participants.find((p) => p !== email)),
+          ),
+        ];
+        const peers = await usersCollection
+          .find(
+            { email: { $in: peerEmails } },
+            { projection: { email: 1, fullName: 1, name: 1, profileImage: 1 } },
+          )
+          .toArray();
+        const peerMap = new Map(peers.map((peer) => [peer.email, peer]));
+
+        return res.send(
+          conversations.map((conversation) => {
+            const peerEmail = conversation.participants.find((p) => p !== email);
+            return formatConversation(
+              conversation,
+              peerMap.get(peerEmail),
+              email,
+            );
+          }),
+        );
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to fetch conversations" });
+      }
+    });
+
+    app.get("/conversations/:id/messages", verifyJWT, async (req, res) => {
+      const conversationId = req.params.id;
+      const { requesterEmail } = req.query;
+
+      if (!ObjectId.isValid(conversationId)) {
+        return res.status(400).send({ message: "Invalid conversation id" });
+      }
+      if (!requesterEmail) {
+        return res.status(400).send({ message: "requesterEmail is required" });
+      }
+
+      try {
+        const { conversation } = await ensureConversationMembership(
+          conversationId,
+          requesterEmail,
+        );
+        if (!conversation) {
+          return res
+            .status(403)
+            .send({ message: "Not allowed to view this conversation" });
+        }
+
+        const messages = await messagesCollection
+          .find({ conversationId: conversation._id })
+          .sort({ createdAt: 1 })
+          .toArray();
+
+        return res.send(messages.map(serializeMessage));
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to fetch messages" });
+      }
+    });
+
+    app.post("/conversations/:id/messages", verifyJWT, async (req, res) => {
+      const conversationId = req.params.id;
+      const { senderEmail, text, imageData } = req.body;
+
+      if (!ObjectId.isValid(conversationId)) {
+        return res.status(400).send({ message: "Invalid conversation id" });
+      }
+      if (!senderEmail) {
+        return res.status(400).send({ message: "senderEmail is required" });
+      }
+
+      try {
+        const message = await createMessage({
+          conversationId,
+          senderEmail,
+          text,
+          imageData,
+        });
+        return res.send(message);
+      } catch (error) {
+        return res.status(400).send({ message: error.message || "Send failed" });
+      }
+    });
+
+    app.patch("/messages/:id", async (req, res) => {
+      const messageId = req.params.id;
+      const { editorEmail, text } = req.body;
+      const cleanText = (text || "").trim();
+
+      if (!ObjectId.isValid(messageId)) {
+        return res.status(400).send({ message: "Invalid message id" });
+      }
+      if (!editorEmail) {
+        return res.status(400).send({ message: "editorEmail is required" });
+      }
+
+      try {
+        const message = await messagesCollection.findOne({
+          _id: new ObjectId(messageId),
+        });
+        if (!message || message.senderEmail !== editorEmail) {
+          return res
+            .status(403)
+            .send({ message: "You can only edit your own message" });
+        }
+        if (!cleanText && !message.imageData) {
+          return res.status(400).send({ message: "Message text cannot be empty" });
+        }
+
+        const now = new Date().toISOString();
+        await messagesCollection.updateOne(
+          { _id: message._id },
+          {
+            $set: {
+              text: cleanText,
+              updatedAt: now,
+              isEdited: true,
+            },
+          },
+        );
+        await rebuildConversationLastMessage(message.conversationId);
+
+        const updated = serializeMessage({
+          ...message,
+          text: cleanText,
+          updatedAt: now,
+          isEdited: true,
+        });
+        io.to(`conversation:${updated.conversationId}`).emit(
+          "message:edited",
+          updated,
+        );
+        io.to(`user:${message.senderEmail}`).emit("conversation:updated");
+        io.to(`user:${message.receiverEmail}`).emit("conversation:updated");
+
+        return res.send(updated);
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to edit message" });
+      }
+    });
+
+    app.delete("/messages/:id", async (req, res) => {
+      const messageId = req.params.id;
+      const requesterEmail = req.query.requesterEmail;
+
+      if (!ObjectId.isValid(messageId)) {
+        return res.status(400).send({ message: "Invalid message id" });
+      }
+      if (!requesterEmail) {
+        return res.status(400).send({ message: "requesterEmail is required" });
+      }
+
+      try {
+        const message = await messagesCollection.findOne({
+          _id: new ObjectId(messageId),
+        });
+        if (!message || message.senderEmail !== requesterEmail) {
+          return res
+            .status(403)
+            .send({ message: "You can only delete your own message" });
+        }
+
+        await messagesCollection.deleteOne({ _id: message._id });
+        await rebuildConversationLastMessage(message.conversationId);
+
+        const conversationId = message.conversationId.toString();
+        io.to(`conversation:${conversationId}`).emit("message:deleted", {
+          messageId,
+          conversationId,
+        });
+        io.to(`user:${message.senderEmail}`).emit("conversation:updated");
+        io.to(`user:${message.receiverEmail}`).emit("conversation:updated");
+
+        return res.send({ message: "Message deleted", messageId, conversationId });
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to delete message" });
+      }
+    });
+
+    app.patch("/conversations/:id/seen", verifyJWT, async (req, res) => {
+      const conversationId = req.params.id;
+      const { viewerEmail } = req.body;
+
+      if (!ObjectId.isValid(conversationId)) {
+        return res.status(400).send({ message: "Invalid conversation id" });
+      }
+      if (!viewerEmail) {
+        return res.status(400).send({ message: "viewerEmail is required" });
+      }
+
+      try {
+        const { conversation, otherEmail } = await ensureConversationMembership(
+          conversationId,
+          viewerEmail,
+        );
+        if (!conversation) {
+          return res.status(403).send({ message: "Not allowed" });
+        }
+
+        const now = new Date().toISOString();
+        await messagesCollection.updateMany(
+          {
+            conversationId: conversation._id,
+            receiverEmail: viewerEmail,
+            seenAt: null,
+          },
+          { $set: { seenAt: now, status: "seen", updatedAt: now } },
+        );
+
+        await conversationsCollection.updateOne(
+          { _id: conversation._id },
+          {
+            $set: {
+              [`unreadCounts.${viewerEmail}`]: 0,
+              updatedAt: now,
+            },
+          },
+        );
+
+        io.to(`conversation:${conversationId}`).emit("message:seen", {
+          conversationId,
+          viewerEmail,
+          seenAt: now,
+        });
+        io.to(`user:${viewerEmail}`).emit("conversation:updated");
+        io.to(`user:${otherEmail}`).emit("conversation:updated");
+
+        return res.send({ message: "Seen status updated" });
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to update seen state" });
+      }
+    });
+
+    app.get("/presence/online", async (req, res) => {
+      return res.send({ onlineUsers: getOnlineEmails() });
+    });
+
+    app.post("/ratings", verifyJWT, async (req, res) => {
+      const { reviewerEmail, targetEmail, rating, review = "" } = req.body;
+      if (!reviewerEmail || !targetEmail || !rating) {
+        return res
+          .status(400)
+          .send({ message: "reviewerEmail, targetEmail and rating are required" });
+      }
+      if (reviewerEmail === targetEmail) {
+        return res.status(400).send({ message: "Cannot rate yourself" });
+      }
+      const numericRating = Number(rating);
+      if (Number.isNaN(numericRating) || numericRating < 1 || numericRating > 5) {
+        return res.status(400).send({ message: "Rating must be between 1 and 5" });
+      }
+
+      try {
+        const connected = await isConnectedPair(reviewerEmail, targetEmail);
+        if (!connected) {
+          return res
+            .status(403)
+            .send({ message: "Rating allowed only for connected users" });
+        }
+
+        const now = new Date().toISOString();
+        await ratingsCollection.updateOne(
+          { reviewerEmail, targetEmail },
+          {
+            $set: {
+              rating: numericRating,
+              review: review.trim(),
+              updatedAt: now,
+            },
+            $setOnInsert: {
+              reviewerEmail,
+              targetEmail,
+              createdAt: now,
+            },
+          },
+          { upsert: true },
+        );
+
+        const [summary] = await ratingsCollection
+          .aggregate([
+            { $match: { targetEmail } },
+            {
+              $group: {
+                _id: "$targetEmail",
+                averageRating: { $avg: "$rating" },
+                totalRatings: { $sum: 1 },
+              },
+            },
+          ])
+          .toArray();
+
+        return res.send({
+          message: "Rating submitted",
+          summary: {
+            averageRating: Number((summary?.averageRating || 0).toFixed(1)),
+            totalRatings: summary?.totalRatings || 0,
+          },
+        });
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to submit rating" });
+      }
+    });
+
+    app.get("/ratings/summary", async (req, res) => {
+      const { targetEmail, reviewerEmail } = req.query;
+      if (!targetEmail) {
+        return res.status(400).send({ message: "targetEmail is required" });
+      }
+
+      try {
+        const [summary] = await ratingsCollection
+          .aggregate([
+            { $match: { targetEmail } },
+            {
+              $group: {
+                _id: "$targetEmail",
+                averageRating: { $avg: "$rating" },
+                totalRatings: { $sum: 1 },
+              },
+            },
+          ])
+          .toArray();
+
+        let myRating = null;
+        if (reviewerEmail) {
+          myRating = await ratingsCollection.findOne(
+            { targetEmail, reviewerEmail },
+            { projection: { rating: 1, review: 1, updatedAt: 1 } },
+          );
+        }
+
+        return res.send({
+          averageRating: Number((summary?.averageRating || 0).toFixed(1)),
+          totalRatings: summary?.totalRatings || 0,
+          myRating,
+        });
+      } catch (error) {
+        return res.status(500).send({ message: "Failed to fetch rating summary" });
+      }
+    });
+
+    // ================= USERS =================
+
+    app.post("/users", async (req, res) => {
+      try {
+        const user = req.body;
+        const existingUser = await usersCollection.findOne({
+          email: user.email,
+        });
+
+        if (existingUser) {
+          return res.send({ message: "User already exists" });
+        }
+
+        const result = await usersCollection.insertOne(user);
+        res.send(result);
+      } catch (error) {
+        res.status(500).send(error);
+      }
+    });
+
+    app.get("/users", async (req, res) => {
+      try {
+        const rawEmail = req.query.email;
+
+        if (!rawEmail || typeof rawEmail !== "string" || !rawEmail.trim()) {
+          return res.status(400).json({
+            success: false,
+            message: "Query parameter 'email' is required.",
+          });
+        }
+
+        // Normalize to lowercase so lookup is case-insensitive
+        const email = rawEmail.trim().toLowerCase();
+
+        const user = await usersCollection.findOne({ email });
+
+        if (!user) {
+          return res.status(404).json({
+            success: false,
+            message: "User not found.",
+          });
+        }
+
+        // Return the raw user document directly (existing frontend contract)
+        res.json(user);
+      } catch (error) {
+        console.error("[GET /users] Error:", error.message);
+        res.status(500).json({ success: false, message: "Internal server error." });
+      }
+    });
+
+    // ================= PLATFORM STATS =================
+
+    app.get("/platform-stats", async (req, res) => {
+      try {
+        const [totalUsers, totalConnections, totalMessages, topExperts] =
+          await Promise.all([
+            usersCollection.countDocuments(),
+            connectionRequestsCollection.countDocuments({ status: "pending" }),
+            messagesCollection.countDocuments(),
+            ratingsCollection
+              .aggregate([
+                {
+                  $group: {
+                    _id: "$targetEmail",
+                    averageRating: { $avg: "$rating" },
+                    totalRatings: { $sum: 1 },
+                  },
+                },
+                { $sort: { averageRating: -1, totalRatings: -1 } },
+                { $limit: 6 },
+              ])
+              .toArray(),
+          ]);
+
+        // Enrich top experts with user data
+        const expertEmails = topExperts.map((e) => e._id);
+        const expertUsers = await usersCollection
+          .find(
+            { email: { $in: expertEmails } },
+            {
+              projection: {
+                email: 1,
+                fullName: 1,
+                profileImage: 1,
+                teachSkills: 1,
+                learnSkills: 1,
+                teachLevel: 1,
+              },
+            },
+          )
+          .toArray();
+        const expertMap = new Map(expertUsers.map((u) => [u.email, u]));
+
+        let experts = topExperts
+          .map((e) => {
+            const userData = expertMap.get(e._id);
+            if (!userData) return null;
+            return {
+              ...userData,
+              averageRating: Number(e.averageRating.toFixed(1)),
+              totalRatings: e.totalRatings,
+            };
+          })
+          .filter(Boolean);
+
+        // Fallback: If not enough rated experts, fetch real registered users from MongoDB
+        if (experts.length < 6) {
+          const existingEmails = new Set(experts.map((e) => e.email));
+          const additionalUsers = await usersCollection
+            .find(
+              { email: { $nin: Array.from(existingEmails) } },
+              {
+                projection: {
+                  email: 1,
+                  fullName: 1,
+                  profileImage: 1,
+                  teachSkills: 1,
+                  learnSkills: 1,
+                  teachLevel: 1,
+                },
+              },
+            )
+            .limit(6 - experts.length)
+            .toArray();
+
+          const mappedAdditional = additionalUsers.map((u) => ({
+            ...u,
+            averageRating: 5.0,
+            totalRatings: 1,
+          }));
+
+          experts = [...experts, ...mappedAdditional];
+        }
+
+        return res.json({
+          totalUsers,
+          totalConnections,
+          totalMessages,
+          experts,
+        });
+      } catch (error) {
+        return res.status(500).json({ message: "Failed to fetch stats" });
+      }
+    });
+
+    // ================= EXPERT DETAILS ENDPOINT =================
+    app.get("/experts/:identifier", async (req, res) => {
+      try {
+        const { identifier } = req.params;
+        const viewerEmail = (req.query.viewerEmail || "").toString().trim().toLowerCase();
+
+        if (!identifier) {
+          return res.status(400).json({ success: false, message: "Expert identifier is required." });
+        }
+
+        // Build precise lookup query (supports Mongo ObjectId, email, or username)
+        let query;
+        if (ObjectId.isValid(identifier)) {
+          query = {
+            $or: [
+              { _id: new ObjectId(identifier) },
+              { email: identifier.toLowerCase() },
+              { username: identifier }
+            ]
+          };
+        } else if (identifier.includes("@")) {
+          query = { email: identifier.toLowerCase() };
+        } else {
+          query = {
+            $or: [
+              { username: identifier },
+              { email: identifier.toLowerCase() }
+            ]
+          };
+        }
+
+        // 1. Fetch Expert Profile with Projection (exclude sensitive internal fields)
+        const user = await usersCollection.findOne(query, {
+          projection: {
+            fullName: 1,
+            name: 1,
+            username: 1,
+            email: 1,
+            profileImage: 1,
+            image: 1,
+            headline: 1,
+            bio: 1,
+            role: 1,
+            location: 1,
+            education: 1,
+            website: 1,
+            github: 1,
+            linkedin: 1,
+            portfolio: 1,
+            teachSkills: 1,
+            learnSkills: 1,
+            teachLevel: 1,
+            learnLevel: 1,
+            projects: 1,
+            certificates: 1,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        });
+
+        if (!user) {
+          return res.status(404).json({
+            success: false,
+            message: "Expert profile not found.",
+          });
+        }
+
+        const targetEmail = user.email;
+
+        // 2. Execute parallel aggregation & joins
+        const [ratingsAgg, reviewsRaw, publishedCourses, connectionRequest] = await Promise.all([
+          // Ratings summary
+          ratingsCollection
+            .aggregate([
+              { $match: { targetEmail } },
+              {
+                $group: {
+                  _id: "$targetEmail",
+                  averageRating: { $avg: "$rating" },
+                  totalRatings: { $sum: 1 },
+                },
+              },
+            ])
+            .toArray(),
+
+          // Raw user reviews
+          ratingsCollection
+            .find({ targetEmail })
+            .sort({ createdAt: -1 })
+            .limit(10)
+            .toArray(),
+
+          // Published instructor courses
+          coursesCollection
+            .find(
+              { instructorEmail: targetEmail, status: "approved" },
+              { projection: { title: 1, category: 1, thumbnail: 1, price: 1, averageRating: 1, totalStudents: 1 } }
+            )
+            .limit(6)
+            .toArray(),
+
+          // Connection status (if viewer email provided)
+          viewerEmail && viewerEmail !== targetEmail.toLowerCase()
+            ? connectionRequestsCollection.findOne({
+                $or: [
+                  { senderEmail: viewerEmail, receiverEmail: targetEmail },
+                  { senderEmail: targetEmail, receiverEmail: viewerEmail },
+                ],
+              })
+            : Promise.resolve(null),
+        ]);
+
+        // Process ratings summary
+        const summaryObj = ratingsAgg[0];
+        const averageRating = summaryObj?.averageRating ? Number(summaryObj.averageRating.toFixed(1)) : 0;
+        const totalRatings = summaryObj?.totalRatings || 0;
+
+        // Enrich reviews with reviewer details
+        const reviewerEmails = [...new Set(reviewsRaw.map((r) => r.reviewerEmail))];
+        const reviewerDocs = reviewerEmails.length > 0
+          ? await usersCollection
+              .find(
+                { email: { $in: reviewerEmails } },
+                { projection: { email: 1, fullName: 1, name: 1, profileImage: 1, image: 1, username: 1 } }
+              )
+              .toArray()
+          : [];
+
+        const reviewerMap = new Map(reviewerDocs.map((u) => [u.email, u]));
+
+        const enrichedReviews = reviewsRaw.map((r) => {
+          const rev = reviewerMap.get(r.reviewerEmail);
+          return {
+            _id: r._id,
+            rating: r.rating,
+            review: r.review || "",
+            createdAt: r.createdAt || r.updatedAt || null,
+            reviewer: {
+              email: r.reviewerEmail,
+              fullName: rev?.fullName || rev?.name || "Anonymous Peer",
+              profileImage: rev?.profileImage || rev?.image || null,
+              username: rev?.username || null,
+            },
+          };
+        });
+
+        // Determine connection status
+        let connectionStatus = "none";
+        if (viewerEmail) {
+          if (viewerEmail === targetEmail.toLowerCase()) {
+            connectionStatus = "self";
+          } else if (connectionRequest) {
+            if (connectionRequest.status === "accepted") {
+              connectionStatus = "connected";
+            } else if (connectionRequest.status === "pending") {
+              connectionStatus = connectionRequest.senderEmail === viewerEmail ? "sent" : "received";
+            }
+          }
+        }
+
+        // Live online presence
+        const isOnline = onlineUsers.has(targetEmail);
+
+        // Standardized Clean API Payload
+        return res.json({
+          success: true,
+          data: {
+            profile: {
+              _id: user._id,
+              fullName: user.fullName || user.name || "Verified Expert",
+              username: user.username || null,
+              email: user.email,
+              profileImage: user.profileImage || user.image || null,
+              headline: user.headline || null,
+              bio: user.bio || null,
+              role: user.role || "Mentor",
+              location: user.location || null,
+              education: user.education || null,
+              website: user.website || null,
+              github: user.github || null,
+              linkedin: user.linkedin || null,
+              portfolio: user.portfolio || null,
+              teachLevel: user.teachLevel || "Mentor",
+              learnLevel: user.learnLevel || "Learner",
+              createdAt: user.createdAt || null,
+              updatedAt: user.updatedAt || null,
+            },
+            skills: {
+              teachSkills: Array.isArray(user.teachSkills) ? user.teachSkills : [],
+              learnSkills: Array.isArray(user.learnSkills) ? user.learnSkills : [],
+            },
+            projects: Array.isArray(user.projects) ? user.projects : [],
+            certificates: Array.isArray(user.certificates) ? user.certificates : [],
+            reviews: {
+              averageRating,
+              totalRatings,
+              items: enrichedReviews,
+            },
+            courses: publishedCourses || [],
+            connectionStatus,
+            isOnline,
+            stats: {
+              teachSkillsCount: Array.isArray(user.teachSkills) ? user.teachSkills.length : 0,
+              projectsCount: Array.isArray(user.projects) ? user.projects.length : 0,
+              certificatesCount: Array.isArray(user.certificates) ? user.certificates.length : 0,
+              coursesCount: publishedCourses ? publishedCourses.length : 0,
+              ratingsCount: totalRatings,
+            },
+          },
+        });
+      } catch (error) {
+        console.error("[GET /experts/:identifier] Error:", error);
+        return res.status(500).json({
+          success: false,
+          message: "Internal server error fetching expert profile.",
+        });
+      }
+    });
+
+    // ================= FIND MENTORS =================
+
+    app.get("/find-mentors", async (req, res) => {
+      try {
+        const { email } = req.query;
+
+        const currentUser = await usersCollection.findOne({ email });
+
+        if (!currentUser) {
+          return res.status(404).send({ message: "User not found" });
+        }
+
+        const learnSkills =
+          currentUser.learnSkills?.map((s) => ({
+            original: s,
+            normalized: normalize(s),
+          })) || [];
+
+        const [otherUsers, pendingRequests] = await Promise.all([
+          usersCollection
+          .find({
+            email: { $ne: email },
+            teachSkills: { $exists: true, $ne: [] },
+          })
+          .toArray(),
+          connectionRequestsCollection
+            .find({
+              status: "pending",
+              $or: [{ senderEmail: email }, { receiverEmail: email }],
+            })
+            .toArray(),
+        ]);
+
+        const pendingRequestMap = new Map();
+        pendingRequests.forEach((request) => {
+          const otherEmail =
+            request.senderEmail === email
+              ? request.receiverEmail
+              : request.senderEmail;
+
+          const connectionStatus =
+            request.senderEmail === email ? "sent" : "received";
+          pendingRequestMap.set(otherEmail, {
+            connectionStatus,
+            requestId: request._id,
+          });
+        });
+
+        const otherUserEmails = otherUsers.map((u) => u.email).filter(Boolean);
+        const ratingSummary = await ratingsCollection
+          .aggregate([
+            { $match: { targetEmail: { $in: otherUserEmails } } },
+            {
+              $group: {
+                _id: "$targetEmail",
+                averageRating: { $avg: "$rating" },
+                totalRatings: { $sum: 1 },
+              },
+            },
+          ])
+          .toArray();
+        const ratingMap = new Map(
+          ratingSummary.map((r) => [
+            r._id,
+            {
+              averageRating: Number((r.averageRating || 0).toFixed(1)),
+              totalRatings: r.totalRatings || 0,
+            },
+          ]),
+        );
+
+        let results = [];
+
+        for (let user of otherUsers) {
+          const teachSkills =
+            user.teachSkills?.map((s) => ({
+              original: s,
+              normalized: normalize(s),
+            })) || [];
+
+          if (teachSkills.length === 0) continue;
+
+          const fuse = createFuse(teachSkills.map((s) => s.normalized));
+
+          let matchCount = 0;
+          let totalScore = 0;
+          let matchedSkills = [];
+
+          for (let learn of learnSkills) {
+            const exact = teachSkills.find(
+              (t) => t.normalized === learn.normalized,
+            );
+
+            if (exact) {
+              matchCount++;
+              matchedSkills.push({
+                learnSkill: learn.original,
+                matchedWith: exact.original,
+              });
+              continue;
+            }
+            const matches = fuse.search(learn.normalized);
+
+            if (matches.length > 0 && matches[0].score < 0.4) {
+              const matchedSkill = teachSkills[matches[0].refIndex];
+
+              matchCount++;
+              totalScore += matches[0].score;
+
+              matchedSkills.push({
+                learnSkill: learn.original,
+                matchedWith: matchedSkill.original,
+              });
+            }
+          }
+
+          if (matchCount > 0) {
+            const percentage = Math.round(
+              (matchCount / learnSkills.length) * 100,
+            );
+
+            const isConnected = (currentUser.connections || []).some(
+              (connection) => connection.email === user.email,
+            );
+            const requestInfo = pendingRequestMap.get(user.email);
+
+            let connectionStatus = "none";
+            if (isConnected) connectionStatus = "connected";
+            else if (requestInfo?.connectionStatus)
+              connectionStatus = requestInfo.connectionStatus;
+
+            results.push({
+              _id: user._id,
+              fullName: user.fullName,
+              email: user.email,
+              profileImage: user.profileImage,
+              education: user.education,
+              teachLevel: user.teachLevel,
+              learnLevel: user.learnLevel,
+              teachSkills: user.teachSkills,
+              connectionStatus,
+              requestId: requestInfo?.requestId || null,
+              averageRating: ratingMap.get(user.email)?.averageRating || 0,
+              totalRatings: ratingMap.get(user.email)?.totalRatings || 0,
+
+              matchCount,
+              matchPercentage: percentage,
+              matchedSkills,
+              score: totalScore / matchCount,
+            });
+          }
+        }
+
+        results.sort((a, b) => {
+          if (b.matchCount === a.matchCount) {
+            return a.score - b.score;
+          }
+          return b.matchCount - a.matchCount;
+        });
+
+        res.send(results);
+      } catch (error) {
+        console.error(error);
+        res.status(500).send({ message: "Server error" });
+      }
+    });
+
+    app.get("/server-time", (req, res) => {
+      return res.send({ serverTime: new Date().toISOString() });
+    });
+
+    console.log("MongoDB Connected");
   } catch (error) {
-    console.error("[Server] Failed to start:", error.message);
-    process.exit(1);
+    console.error(error);
   }
 }
 
-run();
+run().catch(console.dir);
 
-module.exports = { app, httpServer };
+app.get("/", (req, res) => {
+  res.json({
+    status: "ok",
+    message: "CSE Server Running 🚀",
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || "development",
+    mongodb: client?.topology?.isConnected() ? "connected" : "disconnected",
+  });
+});
+
+httpServer.listen(port, () => {
+  console.log(`Server running at http://localhost:${port}`);
+});
