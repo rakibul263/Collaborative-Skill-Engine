@@ -1,18 +1,14 @@
 {
   "name": "cse-server",
   "version": "1.0.0",
-  "description": "Collaborative Skill Engine backend API",
+  "description": "",
   "main": "index.js",
   "scripts": {
     "test": "jest --runInBand",
     "start": "node index.js",
     "dev": "nodemon index.js"
   },
-  "keywords": [
-    "skills",
-    "learning",
-    "mentorship"
-  ],
+  "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
