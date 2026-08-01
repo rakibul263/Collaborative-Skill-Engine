@@ -51,7 +51,6 @@
 - [Contributing](#24-contributing-guide)
 - [License](#25-license)
 - [Credits](#26-credits)
-- [Contact](#27-contact)
 
 ---
 
@@ -108,8 +107,10 @@ A full‑stack, AI‑powered skill‑sharing ecosystem that connects learners, m
 
 | Resource | URL |
 |---|---|
-| **Frontend** | `http://localhost:5173` (development) |
-| **Backend API** | `http://localhost:3000` (development) |
+| **Frontend (Production)** | [collaborative-skill-engine-client.vercel.app](https://collaborative-skill-engine-client.vercel.app) |
+| **Backend API (Production)** | [collaborative-skill-engine-server-production.up.railway.app](https://collaborative-skill-engine-server-production.up.railway.app) |
+| **Frontend (Local)** | `http://localhost:5173` (development) |
+| **Backend API (Local)** | `http://localhost:3000` (development) |
 | **Admin Panel** | `/admin/login` after starting frontend |
 | **Health Check** | `GET /health` |
 | **API Stats** | `GET /api/stats` |
@@ -1409,18 +1410,6 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 ### Contributors
 
 - **Shuvo** — Lead developer & architect
-
----
-
-## 27. Contact
-
-| Channel | Details |
-|---|---|
-| **GitHub** | [github.com/yourusername](https://github.com/yourusername) |
-| **LinkedIn** | [linkedin.com/in/yourprofile](https://linkedin.com/in/yourprofile) |
-| **Email** | collaborativeskillengine@gmail.com |
-| **Admin Contact** | collaborativeskillengine@gmail.com (for account issues) |
-| **Report Issues** | [GitHub Issues](https://github.com/yourusername/collaborative-skill-engine/issues) |
 
 ---
 
