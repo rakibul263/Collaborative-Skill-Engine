@@ -14,10 +14,11 @@ import {
   CheckCircle2,
 } from "lucide-react";
 import { NavLink, useNavigate, useLocation } from "react-router";
-import Swal from "sweetalert2";
+import { toast } from "sonner";
 import LoginButton from "../shared/LoginButton/LoginButton";
 import useAuth from "@/hooks/useAuth";
 import LogoImg from "@/assets/images/logo.png";
+import { ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
 
 const Login = () => {
   const [showPassword, setShowPassword] = useState(false);
@@ -27,15 +28,29 @@ const Login = () => {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Where to go after successful login (set by PrivateRoute via state)
-  const from = location.state?.from?.pathname || "/";
+  // Where to go after successful login (set by PrivateRoute/CourseDetail/Navbar via state or query param)
+  const searchParams = new URLSearchParams(location.search);
+  const returnUrlParam = searchParams.get("returnUrl") || searchParams.get("redirect");
+
+  const candidateFrom =
+    returnUrlParam ||
+    location.state?.returnUrl ||
+    (location.state?.from
+      ? typeof location.state.from === "string"
+        ? location.state.from
+        : `${location.state.from.pathname || ""}${location.state.from.search || ""}`
+      : null) ||
+    "/";
+
+  // Security guard: must be relative path
+  const from = candidateFrom.startsWith("/") && !candidateFrom.startsWith("//") ? candidateFrom : "/";
 
   // If user is already logged in (e.g. navigated to /login directly), redirect out
   useEffect(() => {
     if (user) {
       navigate(from, { replace: true });
     }
-  }, [user]);
+  }, [user, from]);
 
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -45,14 +60,7 @@ const Login = () => {
     e.preventDefault();
     const { email, password } = formData;
     if (!email || !password) {
-      Swal.fire({
-        icon: "warning",
-        title: "Fields Required",
-        text: "Please enter both email and password.",
-        confirmButtonColor: "#6366f1",
-        background: "#0f172a",
-        color: "#f8fafc",
-      });
+      toast.warning("Please enter both email and password.");
       return;
     }
 
@@ -61,22 +69,12 @@ const Login = () => {
     try {
       await signInUser(email, password);
 
-      Swal.fire({
-        icon: "success",
-        title: "Access Granted",
-        text: "Welcome back to the Skill Engine!",
-        showConfirmButton: false,
-        timer: 2000,
-        timerProgressBar: true,
-        background: "#0f172a",
-        color: "#f8fafc",
-      });
-
+      toast.success("Welcome back to the Skill Engine!");
       navigate(from, { replace: true });
     } catch (error) {
       console.error("Login Error:", error);
 
-      let errorMessage = "Invalid credentials, please try again.";
+      let errorMessage = error.message || "Invalid credentials, please try again.";
       if (error.code === "auth/user-not-found")
         errorMessage = "No user found with this email.";
       if (error.code === "auth/wrong-password")
@@ -84,61 +82,26 @@ const Login = () => {
       if (error.code === "auth/too-many-requests")
         errorMessage = "Too many attempts. Try again later.";
 
-      Swal.fire({
-        icon: "error",
-        title: "Login Failed",
-        text: errorMessage,
-        confirmButtonColor: "#4f46e5",
-        background: "#0f172a",
-        color: "#f8fafc",
-      });
+      toast.error(errorMessage);
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleForgotPassword = () => {
-    Swal.fire({
-      title: "Reset Password",
-      text: "Enter your registered email address to receive password reset instructions.",
-      input: "email",
-      inputPlaceholder: "name@example.com",
-      showCancelButton: true,
-      confirmButtonText: "Send Reset Link",
-      confirmButtonColor: "#6366f1",
-      background: "#0f172a",
-      color: "#f8fafc",
-      inputAttributes: {
-        autocapitalize: "off",
-        autocorrect: "off",
-      },
-    }).then(async (result) => {
-      if (result.isConfirmed && result.value) {
-        try {
-          await resetPassword(result.value);
-          Swal.fire({
-            icon: "success",
-            title: "Reset Email Sent",
-            text: `Check your inbox at ${result.value}`,
-            confirmButtonColor: "#6366f1",
-            background: "#0f172a",
-            color: "#f8fafc",
-          });
-        } catch (error) {
+    const emailPrompt = window.prompt("Enter your registered email address to receive password reset instructions:", formData.email);
+    if (emailPrompt) {
+      resetPassword(emailPrompt.trim())
+        .then(() => {
+          toast.success(`Password reset email sent to ${emailPrompt.trim()}`);
+        })
+        .catch((error) => {
           let msg = "Could not send reset email. Please try again.";
           if (error.code === "auth/user-not-found") msg = "No account found with that email.";
           if (error.code === "auth/invalid-email") msg = "Please enter a valid email address.";
-          Swal.fire({
-            icon: "error",
-            title: "Failed to Send",
-            text: msg,
-            confirmButtonColor: "#6366f1",
-            background: "#0f172a",
-            color: "#f8fafc",
-          });
-        }
-      }
-    });
+          toast.error(msg);
+        });
+    }
   };
 
   return (
@@ -288,7 +251,7 @@ const Login = () => {
                 className="w-full mt-6 bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white py-4 rounded-2xl font-bold text-sm flex items-center justify-center gap-2.5 shadow-xl shadow-indigo-600/25 transition-all disabled:opacity-60 cursor-pointer disabled:cursor-not-allowed"
               >
                 {isSubmitting ? (
-                  <Loader2 className="animate-spin text-white" size={18} />
+                  <ButtonSpinner size="sm" />
                 ) : (
                   <>
                     <span className="uppercase text-xs tracking-widest font-extrabold">
@@ -318,8 +281,8 @@ const Login = () => {
                     if (googleNewUser) {
                       sessionStorage.removeItem("googleNewUser");
                       const googleData = JSON.parse(googleNewUser);
-                      navigate("/register", {
-                        state: { fromGoogle: true, googleUser: googleData },
+                      navigate(`/register${from !== "/" ? `?returnUrl=${encodeURIComponent(from)}` : ""}`, {
+                        state: { fromGoogle: true, googleUser: googleData, returnUrl: from },
                       });
                     } else {
                       navigate(from, { replace: true });
@@ -329,21 +292,14 @@ const Login = () => {
                       return; // User closed popup — no error needed
                     }
                     console.error("[Google Sign-in Error]", error.code, error.message);
-                    Swal.fire({
-                      icon: "error",
-                      title: "Google Sign-in Failed",
-                      text: error.message || "Could not sign in with Google.",
-                      confirmButtonColor: "#4f46e5",
-                      background: "#0f172a",
-                      color: "#f8fafc",
-                    });
+                    toast.error(error.message || "Could not sign in with Google.");
                   }
                 }}
               />
               <p className="text-center text-xs font-semibold text-slate-400 mt-6 pt-2">
                 Not a member yet?{" "}
                 <NavLink
-                  to="/register"
+                  to={`/register${from !== "/" ? `?returnUrl=${encodeURIComponent(from)}` : ""}`}
                   className="text-indigo-400 font-extrabold hover:text-indigo-300 hover:underline underline-offset-4 transition-colors"
                 >
                   Join the Engine

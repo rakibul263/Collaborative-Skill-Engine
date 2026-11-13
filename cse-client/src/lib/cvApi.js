@@ -8,7 +8,7 @@ const ensureJWTHeaders = async () => {
   const headers = {};
   let token = getJWT();
   if (!token) {
-    const currentUser = auth.currentUser;
+    const currentUser = auth?.currentUser;
     if (currentUser) {
       try {
         const firebaseToken = await currentUser.getIdToken(true);

@@ -16,7 +16,7 @@ export const exchangeToken = async () => {
 
   exchanging = (async () => {
     try {
-      const currentUser = auth.currentUser;
+      const currentUser = auth?.currentUser;
       if (!currentUser) return null;
 
       const firebaseToken = await currentUser.getIdToken(true);
@@ -51,7 +51,7 @@ export const ensureAuthToken = async () => {
     token = null;
   }
 
-  const currentUser = auth.currentUser;
+  const currentUser = auth?.currentUser;
   if (!currentUser) {
     throw new Error("You must be signed in to continue.");
   }
@@ -72,7 +72,7 @@ apiClient.interceptors.request.use(async (config) => {
   }
 
   let token = getJWT();
-  if ((!token || isTokenExpired(token)) && auth.currentUser) {
+  if ((!token || isTokenExpired(token)) && auth?.currentUser) {
     if (token && isTokenExpired(token)) clearJWT();
     token = await exchangeToken();
   }
@@ -84,9 +84,32 @@ apiClient.interceptors.request.use(async (config) => {
   return config;
 });
 
+axios.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 403 && error.response?.data?.blocked) {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("platform:ip_blocked", { detail: error.response.data })
+        );
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
 apiClient.interceptors.response.use(
   (response) => response,
   async (error) => {
+    if (error.response?.status === 403 && error.response?.data?.blocked) {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("platform:ip_blocked", { detail: error.response.data })
+        );
+      }
+      return Promise.reject(error);
+    }
+
     const original = error.config;
     if (
       error.response?.status === 401 &&

@@ -22,7 +22,8 @@ import axios from "axios";
 import useAuth from "@/hooks/useAuth";
 import EngineLoadingComponent from "@/components/shared/loading/EngineLoadingComponent";
 import { useNavigate } from "react-router";
-import Swal from "sweetalert2";
+import { toast } from "sonner";
+import { ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
 
 const SKILLS = [
   "React", "Node.js", "Python", "TypeScript", "MongoDB",
@@ -336,7 +337,8 @@ const NetworkCard = ({ member, index, currentUser, onRefetch, navigate }) => {
 
   const handleConnect = async () => {
     if (!currentUser) {
-      return Swal.fire({ title: "Login Required", icon: "warning", confirmButtonColor: "#1B1B4B" });
+      toast.warning("Please sign in to connect.");
+      return;
     }
     setLoading(true);
     try {
@@ -348,9 +350,10 @@ const NetworkCard = ({ member, index, currentUser, onRefetch, navigate }) => {
         receiverEmail: member.email,
       });
       setStatus("sent");
+      toast.success("Connection request sent!");
       if (onRefetch) onRefetch();
     } catch (err) {
-      Swal.fire({ title: "Error", text: err.response?.data?.message || "Failed", icon: "error" });
+      toast.error(err.response?.data?.message || "Connection request failed.");
     } finally {
       setLoading(false);
     }
@@ -363,9 +366,10 @@ const NetworkCard = ({ member, index, currentUser, onRefetch, navigate }) => {
         data: { senderEmail: currentUser?.email, receiverEmail: member.email },
       });
       setStatus("none");
+      toast.success("Connection request cancelled.");
       if (onRefetch) onRefetch();
     } catch {
-      Swal.fire("Error", "Could not cancel request.", "error");
+      toast.error("Could not cancel request.");
     } finally {
       setLoading(false);
     }
@@ -474,7 +478,7 @@ const NetworkCard = ({ member, index, currentUser, onRefetch, navigate }) => {
             disabled={loading}
             className="w-full py-3 rounded-2xl bg-slate-50 text-slate-600 border border-slate-200 font-black text-[11px] uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-all disabled:opacity-50"
           >
-            {loading ? <FiLoader className="animate-spin" size={14} /> : <><X size={14} /> Cancel</>}
+            {loading ? <ButtonSpinner size="xs" /> : <><X size={14} /> Cancel</>}
           </button>
         ) : status === "received" ? (
           <button
@@ -489,7 +493,7 @@ const NetworkCard = ({ member, index, currentUser, onRefetch, navigate }) => {
             disabled={loading}
             className="w-full py-3 rounded-2xl bg-[#1B1B4B] text-white font-black text-[11px] uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-indigo-600 transition-all shadow-lg shadow-indigo-100/50 active:scale-95 disabled:opacity-50"
           >
-            {loading ? <FiLoader className="animate-spin" size={14} /> : <><UserCheck size={14} /> Connect</>}
+            {loading ? <ButtonSpinner size="xs" /> : <><UserCheck size={14} /> Connect</>}
           </button>
         )}
       </div>

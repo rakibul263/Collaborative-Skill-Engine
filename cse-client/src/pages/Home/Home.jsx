@@ -21,12 +21,16 @@ const API = import.meta.env.VITE_API_URL || "http://localhost:3000";
 /* ─────────────────────────────────────────────
    ANIMATED COUNTER
 ───────────────────────────────────────────── */
-const Counter = ({ target, suffix = "" }) => {
+const Counter = ({ target = 0, suffix = "" }) => {
   const [count, setCount] = useState(0);
   const ref = useRef(null);
   const started = useRef(false);
 
   useEffect(() => {
+    if (target <= 0) {
+      setCount(0);
+      return;
+    }
     const el = ref.current;
     if (!el) return;
     const obs = new IntersectionObserver(
@@ -34,7 +38,7 @@ const Counter = ({ target, suffix = "" }) => {
         if (entry.isIntersecting && !started.current) {
           started.current = true;
           let start = 0;
-          const step = Math.ceil(target / 60);
+          const step = Math.max(1, Math.ceil(target / 60));
           const timer = setInterval(() => {
             start += step;
             if (start >= target) {
@@ -180,12 +184,10 @@ const Home = () => {
   return (
     <div
       ref={mainRef}
-      className="bg-[#030712] text-slate-100 selection:bg-indigo-500/30 selection:text-indigo-200 font-sans min-h-screen overflow-x-hidden relative"
+      className="bg-transparent text-slate-100 selection:bg-indigo-500/30 selection:text-indigo-200 font-sans min-h-screen overflow-x-hidden relative"
     >
-      {/* Background ambient grid mesh */}
-      <div className="fixed inset-0 bg-grid-pattern opacity-10 pointer-events-none z-0" />
 
-      <HeroSection navigate={navigate} user={user} realUsers={stats.experts || []} />
+      <HeroSection navigate={navigate} user={user} realUsers={stats.experts || []} stats={stats} />
       <SkillTickerSection />
       <StatsSection stats={stats} loaded={statsLoaded} />
       <HowItWorksSection />
@@ -201,7 +203,7 @@ const Home = () => {
 /* ─────────────────────────────────────────────
    HERO SECTION WITH REAL USER DATA IN MOCKUP
 ───────────────────────────────────────────── */
-const HeroSection = ({ navigate, user, realUsers }) => {
+const HeroSection = ({ navigate, user, realUsers, stats }) => {
   const [activeTab, setActiveTab] = useState("matching");
 
   // Pick top 2 real users from API data if available
@@ -272,7 +274,13 @@ const HeroSection = ({ navigate, user, realUsers }) => {
                   </div>
                 ))}
               </div>
-              <span className="font-semibold text-slate-200">10,000+ Registered Learners</span>
+              <span className="font-semibold text-slate-200">
+                {stats?.totalUsers
+                  ? `${stats.totalUsers.toLocaleString()} Registered Learners`
+                  : realUsers.length > 0
+                  ? `${realUsers.length} Registered Learners`
+                  : "Verified Registered Learners"}
+              </span>
             </div>
             <span className="hidden sm:inline text-slate-700">•</span>
             <div className="flex items-center gap-1.5">
@@ -281,7 +289,11 @@ const HeroSection = ({ navigate, user, realUsers }) => {
                   <Star key={i} size={13} className="fill-amber-400" />
                 ))}
               </div>
-              <span className="font-semibold text-slate-200">4.9/5 Average Rating</span>
+              <span className="font-semibold text-slate-200">
+                {stats?.averageRating
+                  ? `${Number(stats.averageRating).toFixed(1)}/5 Community Rating`
+                  : "5.0/5 Community Rating"}
+              </span>
             </div>
             <span className="hidden sm:inline text-slate-700">•</span>
             <div className="flex items-center gap-1.5 text-emerald-400 font-semibold">
@@ -306,7 +318,7 @@ const HeroSection = ({ navigate, user, realUsers }) => {
               <div className="flex items-center gap-2">
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
                   <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
-                  Live MongoDB Data Active
+                  Live Platform Active
                 </span>
               </div>
             </div>
@@ -451,40 +463,40 @@ const HeroSection = ({ navigate, user, realUsers }) => {
 };
 
 /* ─────────────────────────────────────────────
-   STATS SECTION (Bento Grid with API counts)
+   STATS SECTION (Bento Grid with 100% Real API counts)
 ───────────────────────────────────────────── */
 const StatsSection = ({ stats, loaded }) => {
   const items = [
     {
       icon: <Users size={22} />,
-      value: stats.totalUsers || 10,
-      suffix: "+",
+      value: stats.totalUsers || 0,
+      suffix: stats.totalUsers > 0 ? "+" : "",
       label: "Active Registered Members",
-      desc: "Real engineers & mentors registered in MongoDB.",
+      desc: "Engineers & mentors collaborating across the platform.",
       color: "text-indigo-400 bg-indigo-500/10 border-indigo-500/20",
     },
     {
       icon: <Award size={22} />,
-      value: (stats.experts || []).length || 6,
-      suffix: "+",
+      value: (stats.experts || []).length || 0,
+      suffix: (stats.experts || []).length > 0 ? "+" : "",
       label: "Verified Skill Mentors",
       desc: "Community members offering real 1-on-1 mentorship.",
       color: "text-amber-400 bg-amber-500/10 border-amber-500/20",
     },
     {
       icon: <MessageSquare size={22} />,
-      value: stats.totalMessages || 25,
-      suffix: "+",
+      value: stats.totalMessages || 0,
+      suffix: stats.totalMessages > 0 ? "+" : "",
       label: "Live Messages Transferred",
       desc: "Encrypted 1-on-1 chats & session requests.",
       color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
     },
     {
       icon: <Globe size={22} />,
-      value: 12,
-      suffix: "+",
-      label: "Active Learning Hubs",
-      desc: "Worldwide community sharing skill roadmaps.",
+      value: stats.totalCourses || 0,
+      suffix: stats.totalCourses > 0 ? "+" : "",
+      label: "Published Technical Courses",
+      desc: "Real courses & learning tracks built for computer science students.",
       color: "text-purple-400 bg-purple-500/10 border-purple-500/20",
     },
   ];
@@ -907,7 +919,7 @@ const features = [
   {
     icon: <Network size={20} />,
     title: "Global Network Hub",
-    desc: "Connect with skilled developers, designers, and mentors across 50+ countries.",
+    desc: "Connect with skilled developers, peers, and mentors across the engineering community.",
     color: "text-emerald-400 bg-emerald-500/10 border-emerald-500/20",
   },
   {
@@ -989,7 +1001,7 @@ const CTASection = ({ navigate, user }) => (
           </h2>
 
           <p className="text-slate-400 text-sm sm:text-base font-medium mb-8 leading-relaxed">
-            Join thousands of developers, designers, and creators building their skills together.
+            Join engineers, learners, and mentors building and mastering technical skills together.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-3">

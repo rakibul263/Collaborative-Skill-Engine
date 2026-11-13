@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { NavLink, useLocation } from "react-router";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronDown, X, User, LayoutDashboard, ArrowRight, LogOut, Sparkles } from "lucide-react";
+import { ChevronDown, X, User, LayoutDashboard, ArrowRight, LogOut, Sparkles, PlusCircle, Receipt } from "lucide-react";
 
 const MobileNavDrawer = ({
   isOpen,
@@ -14,6 +14,12 @@ const MobileNavDrawer = ({
 }) => {
   const location = useLocation();
   const [expandedItems, setExpandedItems] = useState({});
+
+  const currentPath = `${location.pathname}${location.search}`;
+  const loginUrl =
+    location.pathname === "/login" || location.pathname === "/register"
+      ? "/login"
+      : `/login?returnUrl=${encodeURIComponent(currentPath)}`;
 
   useEffect(() => {
     setIsOpen(false);
@@ -242,15 +248,35 @@ const MobileNavDrawer = ({
                         <span>My Profile</span>
                       </NavLink>
 
+                      <NavLink
+                        to="/my-purchases"
+                        onClick={() => setIsOpen(false)}
+                        className="flex items-center gap-2.5 p-2 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-800"
+                      >
+                        <Receipt size={15} className="text-cyan-500" />
+                        <span>My Purchases &amp; Invoices</span>
+                      </NavLink>
+
                       {isDashboardEligible && (
-                        <NavLink
-                          to="/dashboard"
-                          onClick={() => setIsOpen(false)}
-                          className="flex items-center gap-2.5 p-2 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-800"
-                        >
-                          <LayoutDashboard size={15} className="text-indigo-600" />
-                          <span>Instructor Dashboard</span>
-                        </NavLink>
+                        <>
+                          <NavLink
+                            to="/studio/dashboard"
+                            onClick={() => setIsOpen(false)}
+                            className="flex items-center gap-2.5 p-2 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-800"
+                          >
+                            <LayoutDashboard size={15} className="text-emerald-500" />
+                            <span>Instructor Studio</span>
+                          </NavLink>
+
+                          <NavLink
+                            to="/studio/courses"
+                            onClick={() => setIsOpen(false)}
+                            className="flex items-center gap-2.5 p-2 rounded-xl text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-white dark:hover:bg-slate-800"
+                          >
+                            <PlusCircle size={15} className="text-purple-500" />
+                            <span>Create Course</span>
+                          </NavLink>
+                        </>
                       )}
 
                       <button
@@ -267,7 +293,8 @@ const MobileNavDrawer = ({
                   </div>
                 ) : (
                   <NavLink
-                    to="/login"
+                    to={loginUrl}
+                    state={{ from: location }}
                     onClick={() => setIsOpen(false)}
                     className="w-full flex items-center justify-center gap-2 p-3.5 bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 text-white text-xs font-bold rounded-2xl shadow-lg shadow-indigo-500/25 active:scale-95 transition-all"
                   >

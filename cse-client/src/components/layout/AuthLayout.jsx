@@ -37,8 +37,20 @@ const AuthLayout = () => {
           className="absolute -bottom-[20%] -right-[10%] w-[60vw] h-[60vw] max-w-[800px] max-h-[800px] bg-gradient-to-tl from-purple-600/25 via-indigo-600/20 to-blue-600/10 rounded-full blur-[140px]"
         />
 
-        {/* Micro Grid Overlay */}
-        <div className="absolute inset-0 bg-[linear-gradient(to_right,rgba(255,255,255,0.03)_1px,transparent_1px),linear-gradient(to_bottom,rgba(255,255,255,0.03)_1px,transparent_1px)] bg-[size:4rem_4rem] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_50%,#000_70%,transparent_100%)]" />
+        {/* Modern Precision Matrix Pattern */}
+        <div
+          className="absolute inset-0"
+          style={{
+            backgroundImage: `
+              radial-gradient(circle at 1px 1px, rgba(129, 140, 248, 0.16) 1.2px, transparent 0),
+              linear-gradient(to right, rgba(255, 255, 255, 0.035) 1px, transparent 1px),
+              linear-gradient(to bottom, rgba(255, 255, 255, 0.035) 1px, transparent 1px)
+            `,
+            backgroundSize: "32px 32px, 64px 64px, 64px 64px",
+            maskImage: "radial-gradient(ellipse 80% 80% at 50% 50%, #000 70%, transparent 100%)",
+            WebkitMaskImage: "radial-gradient(ellipse 80% 80% at 50% 50%, #000 70%, transparent 100%)",
+          }}
+        />
       </div>
 
       {/* Sticky Auth Navbar */}

@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
-import { Navigate } from "react-router";
+import { Navigate, useLocation } from "react-router";
 import useAuth from "@/hooks/useAuth";
 import apiClient from "@/lib/apiClient";
+import { FullScreenLoader } from "@/components/shared/loading/LoadingSpinner";
 
 /**
  * EligibleRoute — wraps the /dashboard route.
@@ -10,6 +11,7 @@ import apiClient from "@/lib/apiClient";
  * Renders children only for eligible instructors.
  */
 const EligibleRoute = ({ children }) => {
+  const location = useLocation();
   const { user, loading: authLoading } = useAuth();
   const [loading, setLoading] = useState(true);
   const [eligible, setEligible] = useState(false);
@@ -31,14 +33,15 @@ const EligibleRoute = ({ children }) => {
 
   if (authLoading || loading) {
     return (
-      <div className="flex items-center justify-center min-h-screen">
-        <div className="w-10 h-10 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
-      </div>
+      <FullScreenLoader
+        message="Verifying Studio Eligibility..."
+        subtext="Checking your mentorship standing and credentials"
+      />
     );
   }
 
   if (!user) {
-    return <Navigate to="/login" replace />;
+    return <Navigate to="/login" state={{ from: location }} replace />;
   }
 
   if (!eligible) {

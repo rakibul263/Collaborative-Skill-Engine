@@ -58,6 +58,9 @@ const AuthProvider = ({ children } = {}) => {
   const [loading, setLoading] = useState(true);
 
   const createUser = async (email, password) => {
+    if (!auth) {
+      throw new Error("Firebase Auth is not configured. Please set VITE_apiKey in cse-client/.env");
+    }
     const safeEmail = email?.trim();
     const safePassword = password ?? "";
 
@@ -83,6 +86,9 @@ const AuthProvider = ({ children } = {}) => {
   };
 
   const signInUser = async (email, password) => {
+    if (!auth) {
+      throw new Error("Firebase Auth is not configured. Please set VITE_apiKey in cse-client/.env");
+    }
     const safeEmail = email?.trim();
     const safePassword = password ?? "";
 
@@ -100,6 +106,9 @@ const AuthProvider = ({ children } = {}) => {
   };
 
   const signInWithGoogle = async () => {
+    if (!auth) {
+      throw new Error("Firebase Auth is not configured. Please set VITE_apiKey in cse-client/.env");
+    }
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({ prompt: "select_account" });
     try {
@@ -143,6 +152,9 @@ const AuthProvider = ({ children } = {}) => {
   };
 
   const resetPassword = (email) => {
+    if (!auth) {
+      throw new Error("Firebase Auth is not configured. Please set VITE_apiKey in cse-client/.env");
+    }
     return sendPasswordResetEmail(auth, email);
   };
 
@@ -154,6 +166,11 @@ const AuthProvider = ({ children } = {}) => {
     socket.disconnect();
     clearJWT(); // Clear JWT so next user gets a fresh token
     setLoading(true);
+    if (!auth) {
+      setUser(null);
+      setLoading(false);
+      return;
+    }
     try {
       return await signOut(auth);
     } catch (error) {
@@ -186,7 +203,7 @@ const AuthProvider = ({ children } = {}) => {
         "";
 
       // Non-blocking update to Firebase Auth currentUser
-      if (auth.currentUser && (newPhoto || newName)) {
+      if (auth?.currentUser && (newPhoto || newName)) {
         const fbUpdate = {};
         if (newName) fbUpdate.displayName = newName;
         if (
@@ -216,7 +233,7 @@ const AuthProvider = ({ children } = {}) => {
   }, []);
 
   const refreshUserProfile = useCallback(async (targetEmail) => {
-    const emailToFetch = targetEmail || auth.currentUser?.email || user?.email;
+    const emailToFetch = targetEmail || auth?.currentUser?.email || user?.email;
     if (!emailToFetch) return;
 
     try {
@@ -232,15 +249,70 @@ const AuthProvider = ({ children } = {}) => {
   }, [user?.email, updateUserData]);
 
   useEffect(() => {
+    if (!auth) {
+      setLoading(false);
+      return;
+    }
+    let heartbeatInterval = null;
+    let onConnectHandler = null;
+    let visibilityHandler = null;
+
     const unSubscribe = onAuthStateChanged(auth, async (currentUser) => {
       const socket = getSocket();
+
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (onConnectHandler) socket.off("connect", onConnectHandler);
+      if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
+
       if (!currentUser) {
         setUser(null);
+        socket.emit("presence:leave", {});
         socket.disconnect();
         clearJWT();
         setLoading(false);
       } else {
         clearJWT();
+        if (!socket.connected) socket.connect();
+
+        const joinPresence = () => {
+          if (currentUser?.email) {
+            const clean = String(currentUser.email).trim();
+            socket.emit("presence:join", { email: clean });
+            socket.emit("presence:join", { email: clean.toLowerCase() });
+          }
+        };
+
+        // Emit immediately if connected
+        if (socket.connected) {
+          joinPresence();
+        }
+
+        // Always re-emit when socket connects or reconnects
+        onConnectHandler = () => {
+          joinPresence();
+        };
+        socket.on("connect", onConnectHandler);
+
+        // Keep heartbeat alive every 25 seconds anywhere on the platform
+        heartbeatInterval = setInterval(() => {
+          if (currentUser?.email) {
+            if (!socket.connected) {
+              socket.connect();
+            } else {
+              socket.emit("presence:heartbeat", { email: currentUser.email });
+            }
+          }
+        }, 25000);
+
+        // Visibility listener (re-join when returning to browser tab)
+        visibilityHandler = () => {
+          if (document.visibilityState === "visible" && currentUser?.email) {
+            if (!socket.connected) socket.connect();
+            joinPresence();
+          }
+        };
+        document.addEventListener("visibilitychange", visibilityHandler);
+
         // Set initial user snapshot
         const initialUser = buildMergedUser(currentUser, null);
         setUser(initialUser);
@@ -260,6 +332,14 @@ const AuthProvider = ({ children } = {}) => {
       }
     });
     return () => {
+      if (heartbeatInterval) clearInterval(heartbeatInterval);
+      if (onConnectHandler) {
+        const socket = getSocket();
+        socket.off("connect", onConnectHandler);
+      }
+      if (visibilityHandler) {
+        document.removeEventListener("visibilitychange", visibilityHandler);
+      }
       unSubscribe();
     };
   }, []);

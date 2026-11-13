@@ -19,12 +19,13 @@ import {
   BookOpen,
 } from "lucide-react";
 import { NavLink, useNavigate, useLocation } from "react-router";
-import Swal from "sweetalert2";
+import { toast } from "sonner";
 import axios from "axios";
 import { updateProfile } from "firebase/auth";
 import LoginButton from "../shared/LoginButton/LoginButton";
 import useAuth from "@/hooks/useAuth";
 import LogoImg from "@/assets/images/logo.png";
+import { LoadingSpinner, ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
 
 const INITIAL_SKILLS = [
   "HTML",
@@ -225,6 +226,21 @@ const Register = () => {
   const location = useLocation();
   const { createUser, signInWithGoogle } = useAuth();
 
+  const searchParams = new URLSearchParams(location.search);
+  const returnUrlParam = searchParams.get("returnUrl") || searchParams.get("redirect");
+
+  const candidateFrom =
+    returnUrlParam ||
+    location.state?.returnUrl ||
+    (location.state?.from
+      ? typeof location.state.from === "string"
+        ? location.state.from
+        : `${location.state.from.pathname || ""}${location.state.from.search || ""}`
+      : null) ||
+    "/";
+
+  const from = candidateFrom.startsWith("/") && !candidateFrom.startsWith("//") ? candidateFrom : "/";
+
   const [step, setStep] = useState(1);
   const [isGoogleFlow, setIsGoogleFlow] = useState(false);
   const [googleUid, setGoogleUid] = useState(null);
@@ -298,13 +314,7 @@ const Register = () => {
       setFormData((prev) => ({ ...prev, profileImage: res.data.secure_url }));
     } catch (err) {
       console.error(err);
-      Swal.fire({
-        icon: "error",
-        title: "Upload Failed",
-        text: "Could not upload profile picture. Please try again.",
-        background: "#0f172a",
-        color: "#f8fafc",
-      });
+      toast.error("Could not upload profile picture. Please try again.");
     } finally {
       setIsUploading(false);
     }
@@ -495,24 +505,10 @@ const Register = () => {
 
       await axios.post(`${import.meta.env.VITE_API_URL}/users`, payload);
 
-      Swal.fire({
-        icon: "success",
-        title: "Profile Built!",
-        text: `Welcome ${formData.fullName}! Your Skill Engine profile is live.`,
-        confirmButtonColor: "#6366f1",
-        background: "#0f172a",
-        color: "#f8fafc",
-      });
-      navigate("/");
+      toast.success(`Welcome ${formData.fullName}! Your Skill Engine profile is live.`);
+      navigate(from, { replace: true });
     } catch (error) {
-      Swal.fire({
-        icon: "error",
-        title: "Registration Failed",
-        text: getFirebaseAuthMessage(error),
-        confirmButtonColor: "#4f46e5",
-        background: "#0f172a",
-        color: "#f8fafc",
-      });
+      toast.error(getFirebaseAuthMessage(error));
     } finally {
       setIsSubmitting(false);
     }
@@ -666,22 +662,15 @@ const Register = () => {
                         setGoogleUid(uid);
                         setStep(2);
                       } else {
-                        // Existing user — go home
-                        navigate("/");
+                        // Existing user — return to original page
+                        navigate(from, { replace: true });
                       }
                     } catch (error) {
                       if (error.code === "auth/popup-closed-by-user" || error.code === "auth/cancelled-popup-request") {
                         return;
                       }
                       console.error("[Google Sign-in Error]", error.code, error.message);
-                      Swal.fire({
-                        icon: "error",
-                        title: "Google Sign-in Failed",
-                        text: error.message || "Could not sign in with Google.",
-                        confirmButtonColor: "#4f46e5",
-                        background: "#0f172a",
-                        color: "#f8fafc",
-                      });
+                      toast.error(error.message || "Could not sign in with Google.");
                     }
                   }}
                 />
@@ -689,7 +678,7 @@ const Register = () => {
                 <p className="text-center text-xs font-semibold text-slate-400 mt-4">
                   Already have an account?{" "}
                   <NavLink
-                    to="/login"
+                    to={`/login${from !== "/" ? `?returnUrl=${encodeURIComponent(from)}` : ""}`}
                     className="text-indigo-400 font-extrabold hover:text-indigo-300 hover:underline transition-colors"
                   >
                     Access Portal
@@ -721,7 +710,7 @@ const Register = () => {
                   >
                     <div className="flex-shrink-0 w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex items-center justify-center">
                       {isCvParsing ? (
-                        <Loader2 className="animate-spin text-indigo-400" size={18} />
+                        <LoadingSpinner size="sm" showGlow={false} />
                       ) : (
                         <Upload className="text-indigo-400" size={18} />
                       )}
@@ -853,7 +842,7 @@ const Register = () => {
                   <div className="relative group cursor-pointer">
                     <div className="w-28 h-28 rounded-3xl border-2 border-dashed border-slate-700 flex items-center justify-center overflow-hidden bg-slate-900 group-hover:border-indigo-500/50 transition-all shadow-xl">
                       {isUploading ? (
-                        <Loader2 className="animate-spin text-indigo-400" size={24} />
+                        <LoadingSpinner size="md" showGlow={true} />
                       ) : formData.profileImage ? (
                         <img
                           src={formData.profileImage}
@@ -918,7 +907,7 @@ const Register = () => {
                     className="bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white py-3.5 rounded-2xl font-bold text-xs shadow-xl shadow-indigo-600/25 flex items-center justify-center gap-2 cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 transition-all"
                   >
                     {isSubmitting ? (
-                      <Loader2 className="animate-spin" size={18} />
+                      <ButtonSpinner size="sm" />
                     ) : (
                       "Launch Profile"
                     )}
@@ -1008,7 +997,7 @@ const SkillSelector = ({
               }`}
             >
               {isAiLoading ? (
-                <Loader2 className="animate-spin" size={12} />
+                <LoadingSpinner size="xs" showGlow={false} />
               ) : (
                 <>
                   <Sparkles size={12} />

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { X } from "lucide-react";
+import { ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
 
 const DURATION_OPTIONS = [15, 30, 45, 60, 90, 120, 240];
 const MIN_ADVANCE_MS = 5 * 60 * 1000; // 5 minutes
@@ -31,9 +32,10 @@ function toDatetimeLocalValue(date) {
  *  - onClose {function}
  *  - onSubmit {function(payload)} — payload: { title, startTime (ISO string), durationMinutes (integer) }
  *  - serverOffset {number} — ms difference between server clock and client clock (default 0)
+ *  - initialTitle {string} — optional prefilled topic/title
  */
-const ScheduleModal = ({ isOpen, onClose, onSubmit, serverOffset = 0 }) => {
-  const [title, setTitle] = useState("");
+const ScheduleModal = ({ isOpen, onClose, onSubmit, serverOffset = 0, initialTitle = "" }) => {
+  const [title, setTitle] = useState(initialTitle || "");
   const [startTime, setStartTime] = useState("");
   const [durationMinutes, setDurationMinutes] = useState(30);
   const [errors, setErrors] = useState({});
@@ -49,14 +51,14 @@ const ScheduleModal = ({ isOpen, onClose, onSubmit, serverOffset = 0 }) => {
   useEffect(() => {
     if (isOpen) {
       // Reset all state on open
-      setTitle("");
+      setTitle(initialTitle || "");
       setStartTime("");
       setDurationMinutes(30);
       setErrors({});
       setSubmitError("");
       setLoading(false);
     }
-  }, [isOpen]);
+  }, [isOpen, initialTitle]);
 
   // Close on Escape key
   useEffect(() => {
@@ -271,11 +273,8 @@ const ScheduleModal = ({ isOpen, onClose, onSubmit, serverOffset = 0 }) => {
               className="bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white rounded-xl px-5 py-2.5 text-xs font-bold disabled:opacity-50 transition shadow-md shadow-indigo-600/20"
             >
               {loading ? (
-                <span className="flex items-center gap-1.5">
-                  <svg className="animate-spin w-3.5 h-3.5" fill="none" viewBox="0 0 24 24">
-                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                  </svg>
+                <span className="flex items-center gap-2">
+                  <ButtonSpinner size="xs" />
                   Scheduling…
                 </span>
               ) : (

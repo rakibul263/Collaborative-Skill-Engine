@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { User, LayoutDashboard, LogOut, ChevronDown, Sparkles, Shield, Compass } from "lucide-react";
+import { User, LayoutDashboard, LogOut, ChevronDown, Sparkles, Shield, Compass, PlusCircle, Receipt } from "lucide-react";
 import { NavLink } from "react-router";
 import { withCacheBust } from "@/lib/profileApi";
 
@@ -118,24 +118,63 @@ const UserProfileDropdown = ({ user, handleLogOut, isDashboardEligible }) => {
                 <span>My Profile</span>
               </NavLink>
 
+              <NavLink
+                to="/my-purchases"
+                onClick={() => setIsOpen(false)}
+                className={({ isActive }) =>
+                  `flex items-center gap-3 px-3 py-2 text-xs font-bold rounded-xl transition-all ${
+                    isActive
+                      ? "bg-indigo-950/60 text-indigo-400"
+                      : "text-slate-300 hover:bg-slate-800/60 hover:text-cyan-400"
+                  }`
+                }
+              >
+                <div className="w-7 h-7 rounded-lg bg-cyan-500/10 text-cyan-400 flex items-center justify-center">
+                  <Receipt size={15} />
+                </div>
+                <span>My Purchases &amp; Invoices</span>
+              </NavLink>
+
               {isDashboardEligible && (
-                <NavLink
-                  to="/studio/dashboard"
-                  onClick={() => setIsOpen(false)}
-                  className={({ isActive }) =>
-                    `flex items-center gap-3 px-3 py-2 text-xs font-bold rounded-xl transition-all ${
-                      isActive
-                        ? "bg-indigo-950/60 text-indigo-400"
-                        : "text-slate-300 hover:bg-slate-800/60 hover:text-indigo-400"
-                    }`
-                  }
-                >
-                  <div className="w-7 h-7 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
-                    <LayoutDashboard size={15} />
-                  </div>
-                  <span className="flex-1">Instructor Studio</span>
-                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                </NavLink>
+                <>
+                  <NavLink
+                    to="/studio/dashboard"
+                    onClick={() => setIsOpen(false)}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 px-3 py-2 text-xs font-bold rounded-xl transition-all ${
+                        isActive
+                          ? "bg-indigo-950/60 text-indigo-400"
+                          : "text-slate-300 hover:bg-slate-800/60 hover:text-indigo-400"
+                      }`
+                    }
+                  >
+                    <div className="w-7 h-7 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+                      <LayoutDashboard size={15} />
+                    </div>
+                    <span className="flex-1">Instructor Studio</span>
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                  </NavLink>
+
+                  <NavLink
+                    to="/studio/courses"
+                    onClick={() => setIsOpen(false)}
+                    className={({ isActive }) =>
+                      `flex items-center gap-3 px-3 py-2 text-xs font-bold rounded-xl transition-all ${
+                        isActive
+                          ? "bg-indigo-950/60 text-indigo-400"
+                          : "text-slate-300 hover:bg-slate-800/60 hover:text-indigo-400"
+                      }`
+                    }
+                  >
+                    <div className="w-7 h-7 rounded-lg bg-purple-500/10 text-purple-400 flex items-center justify-center">
+                      <PlusCircle size={15} />
+                    </div>
+                    <span className="flex-1">Create Course</span>
+                    <span className="px-1.5 py-0.5 text-[9px] font-black rounded-full bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                      Active
+                    </span>
+                  </NavLink>
+                </>
               )}
             </div>
 

@@ -1,7 +1,8 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import axios from "axios";
-import Swal from "sweetalert2";
+import { showConfirm } from "@/components/ui/confirm-dialog";
+import { toast } from "@/components/ui/toast-system";
 import { useNavigate } from "react-router";
 import useAuth from "@/hooks/useAuth";
 
@@ -229,20 +230,17 @@ const Request = () => {
     const senderProfile = requesterProfiles[senderEmail];
     const senderName = senderProfile?.fullName || selectedReq?.senderName || senderEmail;
 
-    const confirm = await Swal.fire({
-      title: `<span style="color: #F8FAFC">${action === "accept" ? "Accept Request" : "Decline Request"}</span>`,
-      html: `Are you sure you want to <b>${action}</b> the collaboration invite from <span style="color: #818CF8">${senderName}</span>?`,
-      icon: action === "accept" ? "question" : "warning",
-      showCancelButton: true,
-      confirmButtonColor: action === "accept" ? "#4F46E5" : "#F43F5E",
-      cancelButtonColor: "#1E293B",
-      confirmButtonText: action === "accept" ? "Yes, Accept Collaboration" : "Yes, Decline",
-      cancelButtonText: "Cancel",
-      background: "#0F172A",
-      color: "#F8FAFC",
-      customClass: {
-        popup: "rounded-3xl border border-slate-800",
-      },
+    const confirm = await showConfirm({
+      variant: action === "accept" ? "approve" : "delete",
+      badge: action === "accept" ? "COLLABORATION ACCEPT" : "DECLINE INVITE",
+      title: action === "accept" ? "Accept Collaboration Request?" : "Decline Collaboration Request?",
+      description:
+        action === "accept"
+          ? "Accepting will unlock direct messaging, scheduling, and knowledge exchange."
+          : "This pending collaboration invitation will be declined and removed from your inbox.",
+      targetLabel: "Requester",
+      targetValue: senderName,
+      confirmText: action === "accept" ? "Accept Collaboration" : "Decline Invite",
     });
 
     if (!confirm.isConfirmed) return;
@@ -259,28 +257,23 @@ const Request = () => {
         setRequests((prev) => prev.filter((req) => req.senderEmail !== senderEmail));
         setPreviewOpen(false);
 
-        Swal.fire({
-          title: action === "accept" ? "Collaboration Accepted!" : "Request Declined",
-          text: action === "accept" ? `You are now connected with ${senderName}.` : "The request has been removed.",
-          icon: "success",
-          confirmButtonColor: "#4F46E5",
-          background: "#0F172A",
-          color: "#F8FAFC",
-        });
-
         if (action === "accept") {
+          toast.confirmed(`Connected with ${senderName}!`, {
+            description: "Direct chat channel is now unlocked.",
+            badge: "CONNECTED",
+          });
           navigate(`/message?peer=${encodeURIComponent(senderEmail)}`);
+        } else {
+          toast.deleted("Collaboration Request Declined", {
+            description: "The invitation was removed from your queue.",
+            target: senderName,
+            badge: "DECLINED",
+          });
         }
       }
     } catch (error) {
       console.error("Respond error:", error);
-      Swal.fire({
-        title: "Action Failed",
-        text: "Could not process response. Please try again.",
-        icon: "error",
-        background: "#0F172A",
-        color: "#F8FAFC",
-      });
+      toast.error("Could not process response. Please try again.");
     }
   };
 
@@ -299,7 +292,7 @@ const Request = () => {
   if (loading) return <EngineLoadingComponent />;
 
   return (
-    <div className="min-h-screen bg-[#030712] text-slate-100 font-sans selection:bg-indigo-500/30 pb-28 relative overflow-x-hidden">
+    <div className="min-h-screen bg-transparent text-slate-100 font-sans selection:bg-indigo-500/30 pb-28 relative overflow-x-hidden">
       {/* Background Ambient Gradients */}
       <div className="fixed top-0 left-1/2 -translate-x-1/2 w-[1200px] h-[500px] bg-gradient-to-tr from-indigo-600/15 via-purple-600/10 to-pink-500/10 blur-[180px] pointer-events-none" />
       <div className="fixed bottom-0 right-0 w-[600px] h-[600px] bg-indigo-950/20 blur-[200px] pointer-events-none" />

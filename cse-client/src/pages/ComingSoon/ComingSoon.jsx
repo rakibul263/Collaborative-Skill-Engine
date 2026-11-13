@@ -26,7 +26,7 @@ const ComingSoon = ({ featureName = "Project Teams & Matchmaking Hub" }) => {
   const navigate = useNavigate();
 
   return (
-    <div className="min-h-screen w-full bg-[#030712] text-slate-100 font-sans selection:bg-indigo-500/30 flex items-center justify-center p-6 relative overflow-hidden">
+    <div className="min-h-screen w-full bg-transparent text-slate-100 font-sans selection:bg-indigo-500/30 flex items-center justify-center p-6 relative overflow-hidden">
       {/* Full Viewport Background Mesh Spotlights */}
       <div className="fixed top-0 left-1/2 -translate-x-1/2 w-[1200px] h-[600px] bg-gradient-to-tr from-indigo-600/20 via-purple-600/15 to-pink-500/15 blur-[180px] pointer-events-none" />
       <div className="fixed bottom-0 right-0 w-[700px] h-[700px] bg-indigo-950/30 blur-[220px] pointer-events-none" />

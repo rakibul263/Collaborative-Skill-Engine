@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import axios from "axios"; // used for public unauthenticated endpoints (ratings, courses)
+import apiClient from "@/lib/apiClient";
 import {
   validateImageFile,
   uploadProfileImageToCloudinary,
@@ -11,6 +12,7 @@ import {
   buildDiffPayload,
   sanitizeCertificates,
 } from "@/lib/profileApi";
+import { formatBDT } from "@/lib/money";
 import { useForm } from "react-hook-form";
 import {
   Edit3,
@@ -26,6 +28,7 @@ import {
   Zap,
   LayoutGrid,
   Sparkles,
+  Route,
   X,
   Save,
   User,
@@ -69,10 +72,12 @@ import {
   ArrowDown,
   ShieldAlert,
   Loader2,
+  PlusCircle,
 } from "lucide-react";
 import { NavLink, useNavigate } from "react-router";
 import EngineLoadingComponent from "@/components/shared/loading/EngineLoadingComponent";
-import Swal from "sweetalert2";
+import { LoadingSpinner } from "@/components/shared/loading/LoadingSpinner";
+import { toast } from "sonner";
 import useAuth from "@/hooks/useAuth";
 import { auth } from "@/firebase/firebase.init";
 import { updateProfile as updateFirebaseProfile } from "firebase/auth";
@@ -203,6 +208,7 @@ const MyProfile = () => {
   const [userCourses, setUserCourses] = useState([]);       // courses the user created as instructor
   const [enrolledCourses, setEnrolledCourses] = useState([]); // courses the user purchased/enrolled in
   const [activeTab, setActiveTab] = useState("overview");
+  const [canCreateCourse, setCanCreateCourse] = useState(false);
 
   // Profile Image Upload State
   const [photoPreview, setPhotoPreview] = useState("");
@@ -261,7 +267,80 @@ const MyProfile = () => {
   const watchProfileImage = watch("profileImage");
 
   const fetchUserData = useCallback(async () => {
-    if (!user?.email) return;
+    if (!user?.email) {
+      // Provide an attractive demo profile for preview if not signed in yet
+      const defaultData = {
+        fullName: "Alex Morgan",
+        username: "alexmorgan",
+        headline: "Lead Software Architect & Tech Contributor",
+        bio: "Passionate software engineer building modern scalable web systems, collaborating with global peers, and expanding core computer science fundamentals.",
+        role: "Senior Full Stack Engineer",
+        education: "B.Sc. in Computer Science & Engineering",
+        location: "Dhaka, Bangladesh / Remote Global",
+        website: "https://skillengine.dev",
+        github: "https://github.com",
+        linkedin: "https://linkedin.com",
+        portfolio: "https://skillengine.dev",
+        teachSkills: ["React 19", "Node.js", "Docker", "Tailwind CSS", "MongoDB"],
+        learnSkills: ["LangChain", "Vector Embeddings", "Kubernetes", "Next.js"],
+        teachLevel: "Advanced",
+        learnLevel: "Intermediate",
+        projects: [
+          {
+            title: "Collaborative Skill Engine",
+            description: "Scalable peer-to-peer skill exchange platform with AI career advising, real-time messaging, and interactive workspaces.",
+            techStack: ["React 19", "Node.js", "Socket.io", "FAISS", "Docker"],
+            githubUrl: "https://github.com",
+            demoUrl: "http://localhost:5173",
+          },
+          {
+            title: "Distributed Vector Retrieval Pipeline",
+            description: "Low-latency semantic search engine powered by LangChain and FAISS vector indices for developer mentorship matching.",
+            techStack: ["Node.js", "FAISS", "LangChain", "Express"],
+            githubUrl: "https://github.com",
+            demoUrl: "http://localhost:3000",
+          },
+        ],
+        certificates: [
+          {
+            id: "cert-1",
+            name: "Cloud Native Architecture Specialist",
+            organization: "Collaborative Skill Engine Academy",
+            credentialId: "CSE-2026-ARC-994",
+            credentialUrl: "https://skillengine.dev/verify",
+            issueDate: "2026-01-15",
+            doesNotExpire: true,
+            skills: ["Docker", "Microservices", "React", "MongoDB"],
+            description: "Mastery of end-to-end full stack deployment and containerized cloud services.",
+          },
+        ],
+      };
+      setData(defaultData);
+      setUserProjects(defaultData.projects);
+      setUserCertificates(defaultData.certificates);
+      setPhotoPreview("https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400&auto=format&fit=crop&q=80");
+      reset({
+        fullName: defaultData.fullName,
+        username: defaultData.username,
+        profileImage: "",
+        headline: defaultData.headline,
+        bio: defaultData.bio,
+        role: defaultData.role,
+        education: defaultData.education,
+        location: defaultData.location,
+        website: defaultData.website,
+        github: defaultData.github,
+        linkedin: defaultData.linkedin,
+        portfolio: defaultData.portfolio,
+        teachSkills: defaultData.teachSkills.join(", "),
+        learnSkills: defaultData.learnSkills.join(", "),
+        teachLevel: defaultData.teachLevel,
+        learnLevel: defaultData.learnLevel,
+      });
+      setLoading(false);
+      return;
+    }
+
     try {
       const uData = await fetchProfile(user.email);
       setData(uData);
@@ -327,6 +406,14 @@ const MyProfile = () => {
     } catch {
       // silent fallback — enrolled courses section stays empty
     }
+
+    // Check course creation / studio eligibility
+    try {
+      const eligRes = await apiClient.get("/courses/eligibility");
+      setCanCreateCourse(Boolean(eligRes.data?.canCreateCourse));
+    } catch {
+      setCanCreateCourse(false);
+    }
   }, [user?.email]);
 
   useEffect(() => {
@@ -351,7 +438,7 @@ const MyProfile = () => {
     try {
       validateImageFile(file);
     } catch (err) {
-      Swal.fire({ icon: "error", title: "Invalid Image", text: err.message });
+      toast.error(err.message || "Invalid image format.");
       return;
     }
 
@@ -367,13 +454,10 @@ const MyProfile = () => {
       // 4. Store values for use in onSubmit
       setValue("profileImage", secure_url);
       setPendingPublicId(public_id);
+      toast.success("Profile photo uploaded!");
     } catch (err) {
       console.error("[Profile] Cloudinary upload failed:", err.message);
-      Swal.fire({
-        icon: "error",
-        title: "Upload Failed",
-        text: err.message || "Could not upload image. Please try again.",
-      });
+      toast.error(err.message || "Could not upload image. Please try again.");
       // Old image remains untouched
     } finally {
       setUploadingPhoto(false);
@@ -401,20 +485,12 @@ const MyProfile = () => {
     ];
 
     if (!validTypes.includes(file.type) && !file.name.endsWith(".pdf")) {
-      Swal.fire({
-        icon: "error",
-        title: "Invalid Certificate File",
-        text: "Allowed formats: PDF, JPG, PNG, WEBP, or TXT.",
-      });
+      toast.error("Allowed formats: PDF, JPG, PNG, WEBP, or TXT.");
       return;
     }
 
     if (file.size > 5 * 1024 * 1024) {
-      Swal.fire({
-        icon: "error",
-        title: "File Exceeds 5MB",
-        text: "Certificate files must be under 5MB.",
-      });
+      toast.error("Certificate files must be under 5MB.");
       return;
     }
 
@@ -459,13 +535,7 @@ const MyProfile = () => {
         fileType: fileType || initialFileType,
       }));
 
-      Swal.fire({
-        icon: "success",
-        title: "Certificate Uploaded!",
-        text: "File uploaded to Cloudinary CDN & metadata parsed. Review and save certificate.",
-        timer: 2000,
-        showConfirmButton: false,
-      });
+      toast.success("Certificate uploaded to CDN & metadata parsed!");
     } catch (err) {
       console.error("[Cert Upload Error]:", err);
       // Revert preview on failure
@@ -474,11 +544,7 @@ const MyProfile = () => {
         fileUrl: "",
         public_id: null,
       }));
-      Swal.fire({
-        icon: "error",
-        title: "Upload Failed",
-        text: err.message || "Failed to upload certificate file to Cloudinary. Please try again.",
-      });
+      toast.error(err.message || "Failed to upload certificate file.");
     } finally {
       setExtractingCert(false);
     }
@@ -486,7 +552,7 @@ const MyProfile = () => {
 
   const handleSaveCertificate = () => {
     if (!newCert.name.trim() || !newCert.organization.trim()) {
-      Swal.fire("Required Fields Missing", "Please enter Certificate Name and Issuing Organization.", "warning");
+      toast.warning("Please enter Certificate Name and Issuing Organization.");
       return;
     }
 
@@ -556,13 +622,11 @@ const MyProfile = () => {
           console.error("[Certificates] Auto-sync failed:", err.message);
           // Revert the optimistic update so the UI matches reality
           setUserCertificates(userCertificates);
-          Swal.fire({
-            icon: "error",
-            title: "Save Failed",
-            text: err.message || "Could not save the certificate. Please try again.",
-          });
+          toast.error(err.message || "Could not save the certificate. Please try again.");
         });
     }
+
+    toast.success(editingCertId ? "Certificate updated!" : "Certificate added to profile!");
 
     // Reset Form
     setNewCert({
@@ -630,16 +694,13 @@ const MyProfile = () => {
             }
             if (updateUserData) updateUserData(updatedUserDoc);
           }
+          toast.success("Certificate deleted successfully.");
         })
         .catch((err) => {
           console.error("[Certificates] Delete auto-sync failed:", err.message);
           // Revert the optimistic delete so the cert re-appears
           setUserCertificates(previousCerts);
-          Swal.fire({
-            icon: "error",
-            title: "Delete Failed",
-            text: err.message || "Could not delete the certificate. Please try again.",
-          });
+          toast.error(err.message || "Could not delete the certificate. Please try again.");
         });
     }
   };
@@ -665,7 +726,10 @@ const MyProfile = () => {
   };
 
   const handleAddProject = () => {
-    if (!newProject.title.trim()) return;
+    if (!newProject.title.trim()) {
+      toast.warning("Please provide a project title.");
+      return;
+    }
     const item = {
       id: Date.now().toString(),
       title: newProject.title.trim(),
@@ -677,13 +741,27 @@ const MyProfile = () => {
     };
     setUserProjects((prev) => [...prev, item]);
     setNewProject({ title: "", description: "", techStack: "", githubUrl: "", demoUrl: "" });
+    toast.success("Project added to list!");
   };
 
   const handleRemoveProject = (id) => {
     setUserProjects((prev) => prev.filter((p) => p.id !== id));
+    toast.success("Project removed.");
   };
 
   const onSubmit = async (formValues) => {
+    if (!user?.email) {
+      toast.info("Preview Mode: Changes applied to current view. Sign in to sync permanently with your account.");
+      const updatedFields = {
+        ...formValues,
+        teachSkills: normalizeSkills(formValues.teachSkills),
+        learnSkills: normalizeSkills(formValues.learnSkills),
+      };
+      setData((prev) => ({ ...prev, ...updatedFields }));
+      setIsModalOpen(false);
+      return;
+    }
+
     // ── Prevent duplicate in-flight requests ────────────────────────────────
     if (updateAbortControllerRef.current) {
       updateAbortControllerRef.current.abort();
@@ -701,7 +779,7 @@ const MyProfile = () => {
       };
 
       // ── Safely update Firebase display name (non-blocking) ────────────
-      if (auth.currentUser) {
+      if (auth?.currentUser) {
         try {
           const fbUpdate = { displayName: updatedFields.fullName || auth.currentUser.displayName };
           const imageVal = updatedFields.profileImage;
@@ -770,13 +848,7 @@ const MyProfile = () => {
         }
       }
 
-      Swal.fire({
-        icon: "success",
-        title: "Profile Saved!",
-        text: result.message || "Your profile has been updated successfully.",
-        timer: 2000,
-        showConfirmButton: false,
-      });
+      toast.success(result.message || "Your profile has been updated successfully.");
       setIsModalOpen(false);
     } catch (error) {
       // Ignore aborted requests (user clicked Save again)
@@ -802,11 +874,7 @@ const MyProfile = () => {
         errorMessage = error.response?.data?.message || error.message || "Failed to update profile. Please try again.";
       }
 
-      Swal.fire({
-        icon: "error",
-        title: "Update Failed",
-        text: errorMessage,
-      });
+      toast.error(errorMessage);
     } finally {
       updateAbortControllerRef.current = null;
       setUpdating(false);
@@ -816,6 +884,7 @@ const MyProfile = () => {
   const handleCopyProfileLink = () => {
     navigator.clipboard.writeText(window.location.href);
     setCopied(true);
+    toast.success("Profile link copied to clipboard!");
     setTimeout(() => setCopied(false), 2000);
   };
 
@@ -862,13 +931,12 @@ const MyProfile = () => {
   if (loading) return <EngineLoadingComponent />;
 
   return (
-    <div className="min-h-screen bg-[#030712] text-slate-100 font-sans selection:bg-indigo-500/30 pb-28 relative overflow-x-hidden">
+    <div className="min-h-screen bg-transparent text-slate-100 font-sans selection:bg-indigo-500/30 pb-28 relative overflow-x-hidden">
       {/* Ambient Mesh Spotlights */}
       <div className="fixed top-0 left-1/2 -translate-x-1/2 w-[1200px] h-[600px] bg-gradient-to-tr from-indigo-600/15 via-purple-600/10 to-pink-500/10 blur-[180px] pointer-events-none" />
       <div className="fixed bottom-0 right-0 w-[700px] h-[700px] bg-indigo-950/20 blur-[200px] pointer-events-none" />
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-20 relative z-10 space-y-8">
-        
         {/* ─── 1. HERO PROFILE BANNER CARD ──────────────────────────────────── */}
         <section aria-label="Profile Header">
           <Card className="relative overflow-hidden rounded-3xl border border-slate-800/90 bg-[#0b101d] backdrop-blur-2xl shadow-2xl">
@@ -949,6 +1017,13 @@ const MyProfile = () => {
                     <ShieldCheck size={13} className="mr-1 text-indigo-400" />
                     {data?.role || "Software Developer"}
                   </Badge>
+
+                  {canCreateCourse && (
+                    <Badge variant="default" className="bg-emerald-500/15 text-emerald-300 border-emerald-500/30 font-extrabold text-[11px] px-3 py-0.5">
+                      <Sparkles size={13} className="mr-1 text-emerald-400" />
+                      Course Creator Eligible
+                    </Badge>
+                  )}
 
                   {data?.username && (
                     <span className="text-xs font-semibold text-slate-400 font-mono">
@@ -1471,11 +1546,16 @@ const MyProfile = () => {
                           {project.description || "Production web application built with modern architecture."}
                         </p>
 
-                        {project.techStack?.length > 0 && (
+                        {(Array.isArray(project.techStack)
+                          ? project.techStack.length > 0
+                          : Boolean(project.techStack)) && (
                           <div className="flex flex-wrap gap-1.5 mb-4">
-                            {project.techStack.map((tech) => (
+                            {(Array.isArray(project.techStack)
+                              ? project.techStack
+                              : String(project.techStack).split(/[,/|;\n]+/)
+                            ).map((tech) => (
                               <span key={tech} className="text-[10px] font-semibold px-2 py-0.5 rounded bg-slate-950 border border-slate-800 text-indigo-300">
-                                {tech}
+                                {typeof tech === "string" ? tech.trim() : tech}
                               </span>
                             ))}
                           </div>
@@ -1504,6 +1584,58 @@ const MyProfile = () => {
             {activeTab === "learning" && (
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-6">
                 
+                {/* Active Synced Career Roadmap */}
+                {data?.activeRoadmap && (
+                  <Card className="bg-[#0b101d] border-emerald-500/30 text-slate-100 rounded-3xl p-6 shadow-xl relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-500/5 rounded-full blur-3xl pointer-events-none" />
+                    <CardHeader className="p-0 mb-4 bg-transparent border-none flex flex-row items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="p-2.5 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                          <Route size={20} />
+                        </div>
+                        <div>
+                          <CardTitle className="text-base font-bold text-white flex items-center gap-2">
+                            <span>Active Career Roadmap</span>
+                            <span className="text-[10px] font-mono font-bold text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
+                              AI Synced
+                            </span>
+                          </CardTitle>
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            Target Goal: <span className="text-slate-200 font-medium">{data.activeRoadmap.goal}</span>
+                          </p>
+                        </div>
+                      </div>
+                      <NavLink
+                        to="/ai-advisor"
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/30 text-emerald-300 text-xs font-bold rounded-xl transition"
+                      >
+                        <Sparkles size={13} />
+                        <span>AI Advisor</span>
+                      </NavLink>
+                    </CardHeader>
+                    <CardContent className="p-0 space-y-3 pt-2">
+                      {Array.isArray(data.activeRoadmap.roadmap) && data.activeRoadmap.roadmap.map((step, idx) => (
+                        <div key={idx} className="p-3.5 rounded-2xl bg-slate-950/80 border border-slate-800/80 flex items-start gap-3">
+                          <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-xl bg-emerald-600/20 border border-emerald-500/30 text-emerald-400 text-[10px] font-extrabold">
+                            {idx + 1}
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] font-mono font-bold uppercase tracking-wider text-emerald-400">
+                                {step.phase || `Phase ${idx + 1}`}
+                              </span>
+                            </div>
+                            <h4 className="text-xs font-bold text-white mt-0.5">{step.focus}</h4>
+                            <p className="text-[11px] text-slate-400 mt-0.5 leading-relaxed">
+                              {step.action || step.whyNow}
+                            </p>
+                          </div>
+                        </div>
+                      ))}
+                    </CardContent>
+                  </Card>
+                )}
+
                 {/* Enrolled (Purchased) Courses */}
                 <Card className="bg-[#0b101d] border-slate-800/90 text-slate-100 rounded-3xl p-6 shadow-xl">
                   <CardHeader className="p-0 mb-4 bg-transparent border-none">
@@ -1565,7 +1697,7 @@ const MyProfile = () => {
                         <div key={c._id} className="p-4 rounded-2xl bg-slate-950/90 border border-slate-800/90 flex items-center justify-between">
                           <div>
                             <h4 className="text-xs font-bold text-white">{c.title}</h4>
-                            <p className="text-[11px] text-slate-400 font-medium">Topic: {c.topic} · Price: ৳{c.price}</p>
+                            <p className="text-[11px] text-slate-400 font-medium">Topic: {c.topic} · Price: {formatBDT(c.price)}</p>
                           </div>
                           <span className="text-[10px] font-extrabold px-2.5 py-1 rounded-full bg-indigo-500/10 text-indigo-300 border border-indigo-500/20 uppercase">
                             {c.status}
@@ -1654,6 +1786,14 @@ const MyProfile = () => {
                 Quick Actions
               </h4>
               <div className="space-y-2">
+                {canCreateCourse && (
+                  <Button
+                    onClick={() => navigate("/studio/courses")}
+                    className="w-full justify-start bg-gradient-to-r from-indigo-600 via-indigo-500 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-bold h-10 rounded-xl shadow-md shadow-indigo-600/25"
+                  >
+                    <PlusCircle size={14} className="mr-2" /> Creator Studio & Courses
+                  </Button>
+                )}
                 <Button
                   onClick={() => setIsModalOpen(true)}
                   variant="outline"
@@ -1990,8 +2130,7 @@ const MyProfile = () => {
 
                         {extractingCert ? (
                           <div className="py-4 space-y-2">
-                            <Loader2 className="w-6 h-6 animate-spin text-amber-400 mx-auto" />
-                            <p className="text-xs font-bold text-amber-300">Uploading to Cloudinary CDN & parsing metadata...</p>
+                            <LoadingSpinner size="md" label="Uploading to Cloudinary CDN & parsing metadata..." />
                           </div>
                         ) : newCert.fileUrl ? (
                           <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 space-y-2">
@@ -2271,7 +2410,11 @@ const MyProfile = () => {
                           <div key={p.id || p.title} className="p-3 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-between">
                             <div>
                               <p className="text-xs font-bold text-white">{p.title}</p>
-                              <p className="text-[10px] text-slate-400 font-medium">{p.techStack?.join(", ") || "No stack specified"}</p>
+                              <p className="text-[10px] text-slate-400 font-medium">
+                                {Array.isArray(p.techStack)
+                                  ? p.techStack.join(", ")
+                                  : p.techStack || "No stack specified"}
+                              </p>
                             </div>
                             <button
                               type="button"

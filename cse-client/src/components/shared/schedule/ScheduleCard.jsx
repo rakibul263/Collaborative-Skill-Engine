@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Calendar, Clock, CheckCircle2, XCircle, Sparkles, Loader2 } from "lucide-react";
+import { ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
 
 /**
  * Formats a schedule's startTime and durationMinutes into a human-readable string.
@@ -110,7 +111,7 @@ const ScheduleCard = ({ schedule, currentUserEmail, onAccept, onReject }) => {
             className="flex-1 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-md shadow-emerald-600/20 disabled:opacity-50"
           >
             {loadingAccept ? (
-              <Loader2 size={13} className="animate-spin" />
+              <ButtonSpinner size="xs" />
             ) : (
               <>
                 <CheckCircle2 size={13} /> Accept
@@ -123,7 +124,7 @@ const ScheduleCard = ({ schedule, currentUserEmail, onAccept, onReject }) => {
             className="py-2 px-4 rounded-xl border border-slate-700 hover:bg-slate-800 text-slate-300 font-bold text-xs transition-all disabled:opacity-50"
           >
             {loadingReject ? (
-              <Loader2 size={13} className="animate-spin" />
+              <ButtonSpinner size="xs" />
             ) : (
               "Decline"
             )}

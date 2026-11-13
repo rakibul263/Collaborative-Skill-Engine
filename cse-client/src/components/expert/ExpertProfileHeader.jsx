@@ -20,7 +20,8 @@ import {
   Check,
   Mail,
 } from "lucide-react";
-import Swal from "sweetalert2";
+import { showConfirm } from "@/components/ui/confirm-dialog";
+import { toast } from "@/components/ui/toast-system";
 import { useNavigate } from "react-router";
 import axios from "axios";
 import useAuth from "@/hooks/useAuth";
@@ -63,25 +64,19 @@ const ExpertProfileHeader = ({
 
   const handleConnect = async () => {
     if (!authUser) {
-      return Swal.fire({
-        title: "Login Required",
-        text: "Please log in to connect with mentors.",
-        icon: "warning",
-        background: "#090d16",
-        color: "#fff",
-        confirmButtonColor: "#6366f1",
-      });
+      toast.warning("Please sign in to connect with mentors.");
+      return;
     }
 
-    const confirmResult = await Swal.fire({
+    const confirmResult = await showConfirm({
+      variant: "confirm",
+      badge: "MENTORSHIP INVITE",
       title: "Send Connection Request?",
-      text: `Send a mentorship request to ${fullName}?`,
-      icon: "question",
-      showCancelButton: true,
-      background: "#090d16",
-      color: "#fff",
-      confirmButtonColor: "#6366f1",
-      confirmButtonText: "Send Request",
+      description:
+        "Send a mentorship connection invite to unlock 1-on-1 messaging and session scheduling.",
+      targetLabel: "Mentor",
+      targetValue: fullName,
+      confirmText: "Send Request",
     });
 
     if (!confirmResult.isConfirmed) return;
@@ -100,38 +95,27 @@ const ExpertProfileHeader = ({
       );
 
       setConnectionStatus("sent");
-      Swal.fire({
-        title: "Request Sent!",
-        text: `Connection request sent to ${fullName}.`,
-        icon: "success",
-        background: "#090d16",
-        color: "#fff",
-        confirmButtonColor: "#6366f1",
+      toast.confirmed("Mentorship Request Sent", {
+        description: `Connection invitation delivered to ${fullName}.`,
+        badge: "SENT",
       });
       if (onRefetch) onRefetch();
     } catch (error) {
-      Swal.fire({
-        title: "Error",
-        text: error.response?.data?.message || "Could not send connection request.",
-        icon: "error",
-        background: "#090d16",
-        color: "#fff",
-      });
+      toast.error(error.response?.data?.message || "Could not send connection request.");
     } finally {
       setLoading(false);
     }
   };
 
   const handleWithdraw = async () => {
-    const confirmResult = await Swal.fire({
-      title: "Withdraw Request?",
-      text: "Are you sure you want to cancel this connection request?",
-      icon: "warning",
-      showCancelButton: true,
-      background: "#090d16",
-      color: "#fff",
-      confirmButtonColor: "#ef4444",
-      confirmButtonText: "Yes, Withdraw",
+    const confirmResult = await showConfirm({
+      variant: "delete",
+      badge: "WITHDRAW INVITE",
+      title: "Withdraw Connection Request?",
+      description: "Cancel your pending connection invitation for this mentor.",
+      targetLabel: "Recipient",
+      targetValue: fullName,
+      confirmText: "Yes, Withdraw",
     });
 
     if (!confirmResult.isConfirmed) return;
@@ -145,23 +129,14 @@ const ExpertProfileHeader = ({
         }
       );
       setConnectionStatus("none");
-      Swal.fire({
-        title: "Withdrawn",
-        text: "Connection request cancelled.",
-        icon: "success",
-        background: "#090d16",
-        color: "#fff",
-        confirmButtonColor: "#6366f1",
+      toast.deleted("Connection Request Withdrawn", {
+        description: "Pending invitation cancelled.",
+        target: fullName,
+        badge: "WITHDRAWN",
       });
       if (onRefetch) onRefetch();
     } catch (error) {
-      Swal.fire({
-        title: "Error",
-        text: "Could not cancel request.",
-        icon: "error",
-        background: "#090d16",
-        color: "#fff",
-      });
+      toast.error("Could not cancel request.");
     } finally {
       setLoading(false);
     }

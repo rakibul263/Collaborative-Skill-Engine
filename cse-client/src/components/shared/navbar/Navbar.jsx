@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { NavLink } from "react-router";
+import { NavLink, useLocation } from "react-router";
 import { motion } from "framer-motion";
 import {
   Menu,
@@ -16,6 +16,8 @@ import {
   Globe,
   UserCheck,
   FolderGit2,
+  PlusCircle,
+  GitBranch,
 } from "lucide-react";
 import logoImg from "../../../assets/images/logo.png";
 import useAuth from "@/hooks/useAuth";
@@ -27,9 +29,26 @@ import UserProfileDropdown from "./UserProfileDropdown";
 import MobileNavDrawer from "./MobileNavDrawer";
 
 const Navbar = () => {
+  const location = useLocation();
   const [isMobileOpen, setIsMobileOpen] = useState(false);
   const [isDashboardEligible, setIsDashboardEligible] = useState(false);
+  const [scrolled, setScrolled] = useState(false);
   const { user, loading, LogOut: handleLogOut } = useAuth();
+
+  const currentPath = `${location.pathname}${location.search}`;
+  const loginUrl =
+    location.pathname === "/login" || location.pathname === "/register"
+      ? "/login"
+      : `/login?returnUrl=${encodeURIComponent(currentPath)}`;
+
+  useEffect(() => {
+    const onScroll = () => {
+      setScrolled(window.scrollY > 10);
+    };
+    onScroll();
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
 
   useEffect(() => {
     if (!user) {
@@ -39,18 +58,20 @@ const Navbar = () => {
     apiClient
       .get("/courses/eligibility")
       .then((res) => {
-        const { averageRating, sessionCount } = res.data;
-        setIsDashboardEligible(averageRating >= 4.0 && sessionCount >= 1);
+        const { canCreateCourse } = res.data || {};
+        setIsDashboardEligible(Boolean(canCreateCourse));
       })
-      .catch(() => setIsDashboardEligible(false));
+      .catch(() => {
+        setIsDashboardEligible(false);
+      });
   }, [user]);
 
   // Grouped Navigation Structure:
-  // 1. Home
-  // 2. Find Partners (Experts, Teams, Network)
-  // 3. Workspace (Messages, Requests, Studio) - Requires Auth
-  // 4. Courses
-  // 5. AI Advisor (Vibrant AI feature badge)
+  // 1. Home (Landing Page)
+  // 2. Find Partners (Mentors, Teams, Skill Knowledge Graph)
+  // 3. Courses (Public Catalog & Tracks)
+  // 4. Collaboration (Direct Messages, Connection Requests) - Requires Auth (Studio cleanly removed)
+  // 5. AI Advisor (Flagship AI 2.0 Assistant & Mock Interviewer) - Requires Auth
   const navItems = [
     {
       name: "Home",
@@ -78,47 +99,20 @@ const Navbar = () => {
         {
           title: "Project Teams",
           path: "/teams",
-          desc: "Join active skill squads & build",
+          desc: "Pareto-optimized squads & build",
           icon: <Target size={18} />,
-          badge: "Hot",
+          badge: "Pareto AI",
           badgeColor: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20",
           gradient: "from-emerald-500 to-teal-500",
         },
-      ],
-    },
-    {
-      name: "Workspace",
-      path: "/studio",
-      icon: <FolderGit2 size={16} />,
-      hasChildren: true,
-      requiresAuth: true,
-      children: [
         {
-          title: "Messages",
-          path: "/message",
-          desc: "Direct 1-on-1 chat & collaboration",
-          icon: <MessageSquare size={18} />,
-          badge: "Direct",
-          badgeColor: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20",
-          gradient: "from-indigo-500 to-violet-500",
-        },
-        {
-          title: "Requests",
-          path: "/requests",
-          desc: "Connection & mentorship invites",
-          icon: <UserCheck size={18} />,
-          badge: "Invites",
-          badgeColor: "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20",
-          gradient: "from-purple-500 to-pink-500",
-        },
-        {
-          title: "Studio",
-          path: "/studio",
-          desc: "Creator workspace & dashboard",
-          icon: <LayoutDashboard size={18} />,
-          badge: "Pro",
-          badgeColor: "bg-cyan-500/10 text-cyan-600 dark:text-cyan-400 border-cyan-500/20",
-          gradient: "from-cyan-500 to-blue-500",
+          title: "Skill Knowledge Graph",
+          path: "/skill-graph",
+          desc: "DAG graph gap analysis & career roadmap",
+          icon: <GitBranch size={18} />,
+          badge: "DAG AI",
+          badgeColor: "bg-indigo-500/10 text-indigo-400 border-indigo-500/20",
+          gradient: "from-indigo-500 to-purple-500",
         },
       ],
     },
@@ -128,6 +122,33 @@ const Navbar = () => {
       icon: <BookOpen size={16} />,
       hasChildren: false,
       requiresAuth: false,
+    },
+    {
+      name: "Collaboration",
+      path: "/message",
+      icon: <MessageSquare size={16} />,
+      hasChildren: true,
+      requiresAuth: true,
+      children: [
+        {
+          title: "Direct Messages",
+          path: "/message",
+          desc: "Direct 1-on-1 chat & code collaboration",
+          icon: <MessageSquare size={18} />,
+          badge: "Direct",
+          badgeColor: "bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border-indigo-500/20",
+          gradient: "from-indigo-500 to-violet-500",
+        },
+        {
+          title: "Connection Requests",
+          path: "/requests",
+          desc: "Mentorship & peer connection invites",
+          icon: <UserCheck size={18} />,
+          badge: "Invites",
+          badgeColor: "bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20",
+          gradient: "from-purple-500 to-pink-500",
+        },
+      ],
     },
     {
       name: "AI Advisor",
@@ -145,8 +166,15 @@ const Navbar = () => {
   );
 
   return (
-    <header className="sticky top-0 z-50 w-full bg-gradient-to-r from-primary/10 via-background to-background backdrop-blur-xl border-b border-slate-700/30 dark:border-slate-800/30 shadow-lg transition-colors duration-300">
-      <div className="max-w-7xl mx-auto h-16 px-4 lg:px-8 flex items-center justify-between gap-4">
+    <>
+      <header
+        className={`fixed top-0 inset-x-0 z-50 w-full h-16 transition-all duration-300 backdrop-blur-2xl ${
+          scrolled
+            ? "bg-[#050914]/90 border-b border-indigo-500/20 shadow-[0_12px_35px_rgba(0,0,0,0.65)]"
+            : "bg-[#060a17]/75 border-b border-slate-800/60 shadow-lg"
+        }`}
+      >
+        <div className="max-w-7xl mx-auto h-16 px-4 lg:px-8 flex items-center justify-between gap-4">
         {/* Brand Logo with refined glass effect */}
         <NavLink
           to="/"
@@ -188,6 +216,16 @@ const Navbar = () => {
             </div>
           ) : user ? (
             <>
+              {isDashboardEligible && (
+                <NavLink
+                  to="/studio/courses"
+                  className="hidden md:inline-flex items-center gap-1.5 px-3.5 py-2 bg-gradient-to-r from-indigo-600 via-indigo-500 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-bold rounded-xl shadow-md shadow-indigo-600/25 transition-all hover:scale-105 active:scale-95 cursor-pointer"
+                  title="Create Course & Studio"
+                >
+                  <PlusCircle size={14} />
+                  <span>Create Course</span>
+                </NavLink>
+              )}
               <NotificationBell />
               <UserProfileDropdown
                 user={user}
@@ -197,7 +235,8 @@ const Navbar = () => {
             </>
           ) : (
             <NavLink
-              to="/login"
+              to={loginUrl}
+              state={{ from: location }}
               className="hidden sm:inline-flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-indigo-600 via-violet-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-bold rounded-xl shadow-md hover:shadow-indigo-500/40 hover:scale-105 active:scale-95 transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500"
             >
               <span>Get Started</span>
@@ -214,8 +253,11 @@ const Navbar = () => {
             {isMobileOpen ? <X size={20} /> : <Menu size={20} />}
           </button>
         </div>
-      </div>
-      {/* Mobile Drawer Overlay */}
+        </div>
+      </header>
+      {/* Spacer matching fixed header height so content never slides underneath */}
+      <div className="h-16 w-full shrink-0" aria-hidden="true" />
+      {/* Mobile Drawer Overlay rendered outside header to avoid backdrop-filter fixed trap */}
       <MobileNavDrawer
         isOpen={isMobileOpen}
         setIsOpen={setIsMobileOpen}
@@ -225,7 +267,7 @@ const Navbar = () => {
         handleLogOut={handleLogOut}
         isDashboardEligible={isDashboardEligible}
       />
-    </header>
+    </>
   );
 };
 
