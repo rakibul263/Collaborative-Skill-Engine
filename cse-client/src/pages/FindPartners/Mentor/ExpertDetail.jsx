@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import axios from "axios";
 import Swal from "sweetalert2";
+import { toast } from "sonner";
 import useAuth from "@/hooks/useAuth";
 
 import ExpertProfileHeader from "@/components/expert/ExpertProfileHeader";
@@ -101,25 +102,10 @@ const ExpertDetail = () => {
         review: result.value.review,
       });
 
-      Swal.fire({
-        title: "Feedback Submitted!",
-        text: "Thank you for reviewing this mentor.",
-        icon: "success",
-        timer: 1500,
-        showConfirmButton: false,
-        background: "#090d16",
-        color: "#fff",
-      });
-
+      toast.success("Feedback submitted! Thank you for reviewing this mentor.");
       await fetchExpert();
     } catch (err) {
-      Swal.fire({
-        title: "Error",
-        text: err.response?.data?.message || "Rating submission failed.",
-        icon: "error",
-        background: "#090d16",
-        color: "#fff",
-      });
+      toast.error(err.response?.data?.message || "Rating submission failed.");
     }
   };
 
