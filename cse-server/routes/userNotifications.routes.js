@@ -19,13 +19,14 @@ const { verifyJWT } = require("../middleware/verifyJWT");
 
 const registerUserNotificationRoutes = (app, { userNotificationsCollection, io }) => {
 
-  // GET /user-notifications?email=xxx  — fetch latest 50 for a user
+  // GET /user-notifications?email=xxx  — fetch latest 50 for a user (case-insensitive)
   app.get("/user-notifications", verifyJWT, async (req, res) => {
-    const { email } = req.query;
-    if (!email) return res.status(400).json({ message: "email is required" });
+    const rawEmail = req.query.email || req.user?.email;
+    if (!rawEmail) return res.status(400).json({ message: "email is required" });
     try {
+      const emailRegex = new RegExp(`^${String(rawEmail).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
       const notifs = await userNotificationsCollection
-        .find({ recipientEmail: email })
+        .find({ recipientEmail: emailRegex })
         .sort({ createdAt: -1 })
         .limit(50)
         .toArray();
@@ -37,11 +38,12 @@ const registerUserNotificationRoutes = (app, { userNotificationsCollection, io }
 
   // PATCH /user-notifications/read  — mark all as read for a user
   app.patch("/user-notifications/read", verifyJWT, async (req, res) => {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ message: "email is required" });
+    const rawEmail = req.body.email || req.user?.email;
+    if (!rawEmail) return res.status(400).json({ message: "email is required" });
     try {
+      const emailRegex = new RegExp(`^${String(rawEmail).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
       await userNotificationsCollection.updateMany(
-        { recipientEmail: email, isRead: false },
+        { recipientEmail: emailRegex, isRead: false },
         { $set: { isRead: true } }
       );
       return res.json({ message: "All marked as read" });
@@ -69,29 +71,35 @@ const registerUserNotificationRoutes = (app, { userNotificationsCollection, io }
 
 /**
  * Helper: create a user notification and emit it via socket.
- * Called internally from schedule route handlers.
+ * Called internally from route handlers.
  */
 const createUserNotification = async (
   userNotificationsCollection,
   io,
-  { recipientEmail, type, title, message, scheduleId }
+  { recipientEmail, type, title, message, scheduleId, courseId, lessonId }
 ) => {
+  const cleanEmail = String(recipientEmail).trim().toLowerCase();
   const now = new Date().toISOString();
   const doc = {
-    recipientEmail,
+    recipientEmail: cleanEmail,
     type,
     title,
     message,
     scheduleId: scheduleId ? String(scheduleId) : null,
+    courseId: courseId ? String(courseId) : null,
+    lessonId: lessonId ? String(lessonId) : null,
     isRead: false,
     createdAt: now,
   };
   const result = await userNotificationsCollection.insertOne(doc);
   const created = serializeNotif({ ...doc, _id: result.insertedId });
 
-  // Push in real-time to the recipient
+  // Push in real-time to the recipient (both lowercase and original room)
   if (io) {
-    io.to(`user:${recipientEmail}`).emit("user-notification:new", created);
+    io.to(`user:${cleanEmail}`).emit("user-notification:new", created);
+    if (recipientEmail !== cleanEmail) {
+      io.to(`user:${recipientEmail}`).emit("user-notification:new", created);
+    }
   }
   return created;
 };

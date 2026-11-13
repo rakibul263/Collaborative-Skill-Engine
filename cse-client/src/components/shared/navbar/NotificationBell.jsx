@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { useNavigate } from "react-router";
 import {
   Bell,
   Info,
@@ -8,12 +9,15 @@ import {
   RefreshCw,
   ExternalLink,
   CheckCheck,
+  Award,
+  Video,
+  Users,
 } from "lucide-react";
-import axios from "axios";
+import apiClient from "@/lib/apiClient";
 import useAuth from "@/hooks/useAuth";
 import { getSocket } from "@/lib/socket";
-
-const API = import.meta.env.VITE_API_URL || "http://localhost:3000";
+import { toast } from "@/components/ui/toast-system";
+import TeamInvitationModal from "@/components/teams/TeamInvitationModal";
 
 /* ─── Notification type config ─── */
 const notifConfig = {
@@ -69,14 +73,93 @@ const userNotifConfig = {
     text: "text-rose-600 dark:text-rose-400",
     dot: "bg-rose-500",
   },
+  course_certificate_issued: {
+    icon: <Award size={14} />,
+    bg: "bg-amber-500/10 dark:bg-amber-500/20",
+    border: "border-amber-200 dark:border-amber-800/40",
+    text: "text-amber-600 dark:text-amber-400",
+    dot: "bg-amber-500",
+  },
+  course_video_upload: {
+    icon: <Video size={14} />,
+    bg: "bg-purple-500/10 dark:bg-purple-500/20",
+    border: "border-purple-200 dark:border-purple-800/40",
+    text: "text-purple-600 dark:text-purple-400",
+    dot: "bg-purple-500",
+  },
+  course_banned: {
+    icon: <AlertTriangle size={14} />,
+    bg: "bg-rose-500/10 dark:bg-rose-500/20",
+    border: "border-rose-200 dark:border-rose-800/40",
+    text: "text-rose-600 dark:text-rose-400",
+    dot: "bg-rose-500",
+  },
+  course_suspended: {
+    icon: <AlertTriangle size={14} />,
+    bg: "bg-amber-500/10 dark:bg-amber-500/20",
+    border: "border-amber-200 dark:border-amber-800/40",
+    text: "text-amber-600 dark:text-amber-400",
+    dot: "bg-amber-500",
+  },
+  course_access_restored: {
+    icon: <CheckCircle size={14} />,
+    bg: "bg-emerald-500/10 dark:bg-emerald-500/20",
+    border: "border-emerald-200 dark:border-emerald-800/40",
+    text: "text-emerald-600 dark:text-emerald-400",
+    dot: "bg-emerald-500",
+  },
+  course_appeal: {
+    icon: <AlertTriangle size={14} />,
+    bg: "bg-amber-500/10 dark:bg-amber-500/20",
+    border: "border-amber-200 dark:border-amber-800/40",
+    text: "text-amber-600 dark:text-amber-400",
+    dot: "bg-amber-500",
+  },
+  appeal_reply: {
+    icon: <CheckCircle size={14} />,
+    bg: "bg-cyan-500/10 dark:bg-cyan-500/20",
+    border: "border-cyan-200 dark:border-cyan-800/40",
+    text: "text-cyan-600 dark:text-cyan-400",
+    dot: "bg-cyan-500",
+  },
+  restriction_lifted: {
+    icon: <CheckCircle size={14} />,
+    bg: "bg-emerald-500/10 dark:bg-emerald-500/20",
+    border: "border-emerald-200 dark:border-emerald-800/40",
+    text: "text-emerald-600 dark:text-emerald-400",
+    dot: "bg-emerald-500",
+  },
+  team_invite: {
+    icon: <Users size={14} />,
+    bg: "bg-indigo-500/10 dark:bg-indigo-500/20",
+    border: "border-indigo-200 dark:border-indigo-800/40",
+    text: "text-indigo-600 dark:text-indigo-400",
+    dot: "bg-indigo-500",
+  },
+  team_update: {
+    icon: <CheckCircle size={14} />,
+    bg: "bg-emerald-500/10 dark:bg-emerald-500/20",
+    border: "border-emerald-200 dark:border-emerald-800/40",
+    text: "text-emerald-600 dark:text-emerald-400",
+    dot: "bg-emerald-500",
+  },
+  team_disbanded: {
+    icon: <AlertTriangle size={14} />,
+    bg: "bg-rose-500/10 dark:bg-rose-500/20",
+    border: "border-rose-200 dark:border-rose-800/40",
+    text: "text-rose-600 dark:text-rose-400",
+    dot: "bg-rose-500",
+  },
 };
 
 const NotificationBell = () => {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const [open, setOpen] = useState(false);
   const [activeTab, setActiveTab] = useState("all"); // "all" | "unread"
   const [notifications, setNotifications] = useState([]); // admin broadcast notifications
   const [userNotifs, setUserNotifs] = useState([]); // persistent user-specific notifications
+  const [selectedInviteNotif, setSelectedInviteNotif] = useState(null);
   const [readIds, setReadIds] = useState(() => {
     try {
       return new Set(JSON.parse(localStorage.getItem("cse_read_notifs") || "[]"));
@@ -88,7 +171,7 @@ const NotificationBell = () => {
 
   const fetchNotifications = useCallback(async () => {
     try {
-      const res = await axios.get(`${API}/notifications`);
+      const res = await apiClient.get("/notifications");
       setNotifications(res.data || []);
     } catch {
       /* silent catch */
@@ -98,12 +181,12 @@ const NotificationBell = () => {
   const fetchUserNotifs = useCallback(async () => {
     if (!user?.email) return;
     try {
-      const res = await axios.get(
-        `${API}/user-notifications?email=${encodeURIComponent(user.email)}`
+      const res = await apiClient.get(
+        `/user-notifications?email=${encodeURIComponent(user.email)}`
       );
       setUserNotifs(res.data || []);
-    } catch {
-      /* silent catch */
+    } catch (err) {
+      console.warn("[NotificationBell] fetchUserNotifs warning:", err?.message);
     }
   }, [user?.email]);
 
@@ -114,6 +197,19 @@ const NotificationBell = () => {
     const socket = getSocket();
     if (!socket.connected) socket.connect();
 
+    if (user?.email) {
+      socket.emit("presence:join", { email: user.email });
+      socket.emit("presence:join", { email: user.email.toLowerCase() });
+    }
+
+    const onConnect = () => {
+      if (user?.email) {
+        socket.emit("presence:join", { email: user.email });
+        socket.emit("presence:join", { email: user.email.toLowerCase() });
+      }
+    };
+    socket.on("connect", onConnect);
+
     // Admin broadcast notifications
     const onNew = (notif) => setNotifications((prev) => [notif, ...prev]);
     const onDeleted = ({ id }) =>
@@ -121,26 +217,27 @@ const NotificationBell = () => {
     socket.on("notification:new", onNew);
     socket.on("notification:deleted", onDeleted);
 
-    // Persistent user-specific notifications (schedule events)
+    // Persistent user-specific notifications (course events, videos, schedules)
     const onUserNotif = (notif) => {
       setUserNotifs((prev) => {
         if (prev.some((n) => n._id === notif._id)) return prev;
         return [notif, ...prev];
       });
+
+      // Avoid duplicate top toast for chat/appeals since BottomNotificationPopup handles them
+      const isChatOrAppeal = ["chat_message", "course_appeal", "appeal_reply", "restriction_lifted"].includes(notif?.type);
+      if (!isChatOrAppeal) {
+        toast.info(notif.title || "New Notification", {
+          description: notif.message,
+        });
+      }
     };
     socket.on("user-notification:new", onUserNotif);
 
-    return () => {
-      socket.off("notification:new", onNew);
-      socket.off("notification:deleted", onDeleted);
-      socket.off("user-notification:new", onUserNotif);
-    };
-  }, [fetchNotifications, fetchUserNotifs]);
-
-  // Close on outside click or Escape key
-  useEffect(() => {
     const handleClickOutside = (e) => {
-      if (bellRef.current && !bellRef.current.contains(e.target)) setOpen(false);
+      if (bellRef.current && !bellRef.current.contains(e.target)) {
+        setOpen(false);
+      }
     };
     const handleKeyDown = (e) => {
       if (e.key === "Escape") setOpen(false);
@@ -148,11 +245,16 @@ const NotificationBell = () => {
 
     document.addEventListener("mousedown", handleClickOutside);
     document.addEventListener("keydown", handleKeyDown);
+
     return () => {
+      socket.off("connect", onConnect);
+      socket.off("notification:new", onNew);
+      socket.off("notification:deleted", onDeleted);
+      socket.off("user-notification:new", onUserNotif);
       document.removeEventListener("mousedown", handleClickOutside);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, []);
+  }, [fetchNotifications, fetchUserNotifs, user?.email]);
 
   // Count unread
   const userNotifsUnread = userNotifs.filter((n) => !n.isRead).length;
@@ -168,8 +270,8 @@ const NotificationBell = () => {
     localStorage.setItem("cse_read_notifs", JSON.stringify([...newSet]));
 
     if (user?.email && userNotifsUnread > 0) {
-      axios
-        .patch(`${API}/user-notifications/read`, { email: user.email })
+      apiClient
+        .patch("/user-notifications/read", { email: user.email })
         .catch(() => {});
       setUserNotifs((prev) => prev.map((n) => ({ ...n, isRead: true })));
     }
@@ -185,7 +287,7 @@ const NotificationBell = () => {
     setUserNotifs((prev) =>
       prev.map((n) => (n._id === id ? { ...n, isRead: true } : n))
     );
-    axios.patch(`${API}/user-notifications/${id}/read`).catch(() => {});
+    apiClient.patch(`/user-notifications/${id}/read`).catch(() => {});
   };
 
   // Merge & sort all notifications newest-first
@@ -340,6 +442,19 @@ const NotificationBell = () => {
                       onClick={() => {
                         if (n._userNotif) {
                           markUserNotifRead(n._id);
+                          if (n.type === "team_invite" || (n.teamId && !n.actionUrl)) {
+                            setSelectedInviteNotif(n);
+                            setOpen(false);
+                          } else if (n.type === "course_appeal" || n.actionUrl?.includes("/studio/appeals")) {
+                            navigate(n.actionUrl || `/studio/appeals${n.appealId ? `?appealId=${n.appealId}` : ""}`);
+                            setOpen(false);
+                          } else if (n.courseId) {
+                            navigate(`/learn/${n.courseId}`);
+                            setOpen(false);
+                          } else if (n.link || n.actionUrl) {
+                            navigate(n.link || n.actionUrl);
+                            setOpen(false);
+                          }
                         } else {
                           markRead(n._id);
                           if (n.link) window.open(n.link, "_blank");
@@ -380,6 +495,26 @@ const NotificationBell = () => {
                             View details <ExternalLink size={10} />
                           </span>
                         )}
+
+                        {/* Team invitation quick review pill */}
+                        {n.type === "team_invite" && (
+                          <div className="mt-2 flex items-center gap-2">
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-600 dark:text-indigo-400 hover:underline">
+                              <Users size={11} />
+                              <span>View Squad & Respond →</span>
+                            </span>
+                            {n.responded === "accepted" && (
+                              <span className="text-[9px] font-bold text-emerald-500 bg-emerald-500/10 border border-emerald-500/20 px-1.5 py-0.2 rounded">
+                                Accepted
+                              </span>
+                            )}
+                            {n.responded === "declined" && (
+                              <span className="text-[9px] font-bold text-slate-400 bg-slate-800 border border-slate-700 px-1.5 py-0.2 rounded">
+                                Declined
+                              </span>
+                            )}
+                          </div>
+                        )}
                       </div>
 
                       {!n._isRead && (
@@ -402,6 +537,24 @@ const NotificationBell = () => {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Team Invitation Modal */}
+      <TeamInvitationModal
+        isOpen={!!selectedInviteNotif}
+        teamId={selectedInviteNotif?.teamId}
+        notification={selectedInviteNotif}
+        onClose={() => setSelectedInviteNotif(null)}
+        onResponded={(status, tId) => {
+          fetchUserNotifs();
+          setUserNotifs((prev) =>
+            prev.map((item) =>
+              item._id === selectedInviteNotif?._id || item.teamId === tId
+                ? { ...item, responded: status, isRead: true }
+                : item
+            )
+          );
+        }}
+      />
     </div>
   );
 };
