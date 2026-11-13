@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from "react";
 import { useForm } from "react-hook-form";
 import axios from "axios";
-import Swal from "sweetalert2";
+import { toast } from "@/components/ui/toast-system";
+import { showConfirm } from "@/components/ui/confirm-dialog";
 import { Bell, Send, Trash2, Info, AlertTriangle, CheckCircle, RefreshCw } from "lucide-react";
+import { LoadingSpinner, ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
@@ -39,21 +41,36 @@ const AdminNotifications = () => {
       );
       setNotifications((prev) => [res.data, ...prev]);
       reset();
-      Swal.fire({ icon: "success", title: "Notification sent!", timer: 1500, showConfirmButton: false });
+      toast.success("Notification sent!");
     } catch (err) {
       const msg = err?.response?.data?.message || "Failed to send notification. Please try again.";
-      Swal.fire({ icon: "error", title: msg, timer: 2000, showConfirmButton: false });
+      toast.error(msg);
     } finally {
       setSubmitting(false);
     }
   };
 
-  const handleDelete = async (id) => {
+  const handleDelete = async (id, title) => {
+    const { isConfirmed } = await showConfirm({
+      variant: "delete",
+      badge: "NOTIFICATION DELETE",
+      title: "Delete Notification?",
+      description: "This notification will be removed permanently.",
+      targetLabel: "Notification Title",
+      targetValue: title,
+      confirmText: "Delete Notification",
+    });
+    if (!isConfirmed) return;
+
     try {
       await axios.delete(`${API}/notifications/${id}`, { withCredentials: true });
       setNotifications((prev) => prev.filter((n) => String(n._id) !== String(id)));
+      toast.deleted("Notification Removed", {
+        description: "Notification deleted from platform records.",
+        target: title,
+      });
     } catch {
-      Swal.fire({ icon: "error", title: "Failed to delete.", timer: 1500, showConfirmButton: false });
+      toast.error("Failed to delete notification.");
     }
   };
 
@@ -108,7 +125,7 @@ const AdminNotifications = () => {
             disabled={submitting}
             className="flex items-center gap-2 px-6 py-2.5 bg-[#1B1B4B] hover:bg-indigo-700 text-white rounded-xl text-sm font-black transition-all shadow-sm disabled:opacity-50"
           >
-            {submitting ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Send size={14} />}
+            {submitting ? <ButtonSpinner size="xs" /> : <Send size={14} />}
             Send Notification
           </button>
         </form>
@@ -122,7 +139,7 @@ const AdminNotifications = () => {
         </div>
         {loading ? (
           <div className="flex items-center justify-center h-32">
-            <div className="w-6 h-6 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+            <LoadingSpinner size="sm" />
           </div>
         ) : notifications.length === 0 ? (
           <div className="text-center py-12">
@@ -151,7 +168,7 @@ const AdminNotifications = () => {
                     </p>
                   </div>
                   <button
-                    onClick={() => handleDelete(n._id)}
+                    onClick={() => handleDelete(n._id, n.title)}
                     className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all shrink-0"
                   >
                     <Trash2 size={14} />
