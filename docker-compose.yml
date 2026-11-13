@@ -1,0 +1,40 @@
+services:
+  server:
+    build:
+      context: ./cse-server
+      dockerfile: Dockerfile
+    container_name: cse-server
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    env_file:
+      - ./cse-server/.env
+    environment:
+      - PORT=3000
+    volumes:
+      - ./cse-server/storage:/app/storage
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    networks:
+      - cse-network
+
+  client:
+    build:
+      context: ./cse-client
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=http://localhost:3000
+    container_name: cse-client
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - server
+    networks:
+      - cse-network
+
+networks:
+  cse-network:
+    driver: bridge
+

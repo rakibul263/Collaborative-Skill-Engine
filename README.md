@@ -966,7 +966,24 @@ VITE_CLOUDINARY_CLOUD_NAME=your_cloudinary_cloud_name
 3. Save the JSON file as `cse-server/firebase-service-account.json`
 4. Set `FIREBASE_SERVICE_ACCOUNT_PATH=./firebase-service-account.json` in your `.env`
 
-### Run in Development
+### Run with Docker (Recommended)
+
+Run both client and server with a single command:
+
+```bash
+# Build and start all services in background
+docker compose up -d --build
+
+# View logs
+docker compose logs -f
+
+# Stop containers
+docker compose down
+```
+
+The client will be running at `http://localhost:5173` and the server at `http://localhost:3000`.
+
+### Run in Development (Manual)
 
 ```bash
 # Terminal 1: Start the server

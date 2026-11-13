@@ -1,4 +1,14 @@
 node_modules
 .git
+.gitignore
+.DS_Store
+.env
 *.md
+*.log
 __tests__
+npm-debug.log*
+.nyc_output
+coverage
+storage
+nixpacks.toml
+railway.toml
