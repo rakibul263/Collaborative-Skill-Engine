@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
 import apiClient from "@/lib/apiClient";
-import Swal from "sweetalert2";
+import { showConfirm } from "@/components/ui/confirm-dialog";
+import { toast } from "@/components/ui/toast-system";
+import { LoadingSpinner } from "@/components/shared/loading/LoadingSpinner";
 
 export default function EnrolledStudents() {
   const [data, setData] = useState(null);
@@ -28,7 +30,7 @@ export default function EnrolledStudents() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-24">
-        <div className="w-10 h-10 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+        <LoadingSpinner size="lg" label="Loading student enrollments..." />
       </div>
     );
   }
@@ -70,13 +72,15 @@ export default function EnrolledStudents() {
   };
 
   const handleBan = async (enrollment) => {
-    const result = await Swal.fire({
-      title: "Ban Student?",
-      text: `Ban ${enrollment.learnerName}? This will restrict their access to the course.`,
-      icon: "warning",
-      showCancelButton: true,
-      confirmButtonColor: "#dc2626",
-      confirmButtonText: "Confirm Ban",
+    const result = await showConfirm({
+      variant: "danger",
+      badge: "STUDENT RESTRICTION",
+      title: "Ban Student Access?",
+      description:
+        "This will restrict the student's access to all lessons and course resources.",
+      targetLabel: "Student",
+      targetValue: enrollment.learnerName,
+      confirmText: "Confirm Ban",
     });
 
     if (!result.isConfirmed) return;
@@ -94,8 +98,9 @@ export default function EnrolledStudents() {
           ),
         })),
       }));
+      toast.success("Student access restricted.");
     } catch {
-      Swal.fire("Error", "Action failed. Please try again.", "error");
+      toast.error("Action failed. Please try again.");
     }
   };
 
@@ -113,8 +118,9 @@ export default function EnrolledStudents() {
           }),
         })),
       }));
+      toast.success("Student access restored.");
     } catch {
-      Swal.fire("Error", "Action failed. Please try again.", "error");
+      toast.error("Action failed. Please try again.");
     }
   };
 

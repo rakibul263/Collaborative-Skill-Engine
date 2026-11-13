@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
+import { toast } from "sonner";
 import {
-  DollarSign,
+  Wallet,
   Users,
   BookOpen,
   Star,
@@ -8,6 +9,7 @@ import {
   TrendingUp,
   Award,
   Video,
+  Youtube,
   Settings,
   Bell,
   RefreshCw,
@@ -26,6 +28,7 @@ import {
   Copy,
   Sparkles,
 } from "lucide-react";
+import { formatBDT } from "@/lib/money";
 import {
   AreaChart,
   Area,
@@ -43,6 +46,7 @@ import {
 import apiClient from "@/lib/apiClient";
 import CourseEditorModal from "./CourseEditorModal";
 import LessonEditorModal from "./LessonEditorModal";
+import YouTubeVideoUploadModal from "./YouTubeVideoUploadModal";
 import StudentManagementModal from "./StudentManagementModal";
 
 const COLORS = ["#6366f1", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6"];
@@ -62,6 +66,7 @@ const StudioDashboardView = ({ eligibleTopics = [] }) => {
   const [showCourseModal, setShowCourseModal] = useState(false);
   const [selectedCourseForEdit, setSelectedCourseForEdit] = useState(null);
   const [showLessonModal, setShowLessonModal] = useState(false);
+  const [videoUploadLesson, setVideoUploadLesson] = useState(null);
   const [selectedCourseIdForLesson, setSelectedCourseIdForLesson] = useState(null);
   const [selectedLessonForEdit, setSelectedLessonForEdit] = useState(null);
   const [selectedStudentForMgmt, setSelectedStudentForMgmt] = useState(null);
@@ -142,18 +147,20 @@ const StudioDashboardView = ({ eligibleTopics = [] }) => {
         curriculum: course.curriculum || [{ title: "Module 1" }],
       };
       await apiClient.post("/courses", payload);
+      toast.success("Course duplicated successfully!");
       fetchData();
     } catch (err) {
-      alert("Duplication failed.");
+      toast.error("Duplication failed.");
     }
   };
 
   const handleSubmitCourseForReview = async (courseId) => {
     try {
       await apiClient.patch(`/courses/${courseId}/submit`, {});
+      toast.success("Course submitted for review!");
       fetchData();
     } catch (err) {
-      alert(err?.response?.data?.message || "Submission failed.");
+      toast.error(err?.response?.data?.message || "Submission failed.");
     }
   };
 
@@ -256,10 +263,10 @@ const StudioDashboardView = ({ eligibleTopics = [] }) => {
               <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 space-y-3">
                 <div className="flex items-center justify-between text-slate-400">
                   <span className="text-xs font-bold uppercase tracking-wider">Lifetime Revenue</span>
-                  <DollarSign className="w-5 h-5 text-emerald-400" />
+                  <Wallet className="w-5 h-5 text-emerald-400" />
                 </div>
                 <div className="text-3xl font-black text-white">
-                  ${analytics?.totalRevenue || "0.00"}
+                  {formatBDT(analytics?.totalRevenue || 0)}
                 </div>
                 <p className="text-[11px] text-slate-400">85% instructor earnings payout share</p>
               </div>
@@ -270,7 +277,7 @@ const StudioDashboardView = ({ eligibleTopics = [] }) => {
                   <TrendingUp className="w-5 h-5 text-indigo-400" />
                 </div>
                 <div className="text-3xl font-black text-white">
-                  ${analytics?.monthlyRevenue || "0.00"}
+                  {formatBDT(analytics?.monthlyRevenue || 0)}
                 </div>
                 <p className="text-[11px] text-emerald-400 font-semibold">+18.4% growth this month</p>
               </div>
@@ -317,8 +324,11 @@ const StudioDashboardView = ({ eligibleTopics = [] }) => {
                       </defs>
                       <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
                       <XAxis dataKey="month" stroke="#94a3b8" fontSize={12} />
-                      <YAxis stroke="#94a3b8" fontSize={12} />
-                      <Tooltip contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155" }} />
+                      <YAxis stroke="#94a3b8" allowDecimals={false} fontSize={12} tickFormatter={(v) => `৳${Math.round(v)}`} />
+                      <Tooltip
+                        contentStyle={{ backgroundColor: "#0f172a", borderColor: "#334155" }}
+                        formatter={(val) => [formatBDT(val), "Revenue (BDT)"]}
+                      />
                       <Area type="monotone" dataKey="revenue" stroke="#6366f1" strokeWidth={3} fillOpacity={1} fill="url(#colorRev)" />
                     </AreaChart>
                   </ResponsiveContainer>
@@ -329,19 +339,19 @@ const StudioDashboardView = ({ eligibleTopics = [] }) => {
               <div className="bg-gradient-to-br from-indigo-950/80 to-slate-900 border border-indigo-500/30 rounded-3xl p-6 flex flex-col justify-between space-y-6">
                 <div className="space-y-3">
                   <div className="w-12 h-12 rounded-2xl bg-indigo-600/30 border border-indigo-500/40 flex items-center justify-center text-indigo-400">
-                    <DollarSign className="w-6 h-6" />
+                    <Wallet className="w-6 h-6" />
                   </div>
                   <h3 className="text-lg font-bold text-white">Pending Payout Balance</h3>
                   <p className="text-xs text-slate-300">
                     Automated payouts processed directly to your linked account.
                   </p>
                   <div className="text-4xl font-black text-emerald-400">
-                    ${analytics?.pendingPayouts || "0.00"}
+                    {formatBDT(analytics?.pendingPayouts || 0)}
                   </div>
                 </div>
 
                 <button
-                  onClick={() => alert("Payout request sent for processing.")}
+                  onClick={() => toast.success("Payout request sent for processing.")}
                   className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-xl shadow-lg transition-colors"
                 >
                   Request Express Payout
@@ -470,7 +480,7 @@ const StudioDashboardView = ({ eligibleTopics = [] }) => {
                       </div>
 
                       <div className="flex items-center justify-between text-xs font-bold text-white pt-2 border-t border-slate-800">
-                        <span>Price: ${course.price}</span>
+                        <span>Price: {formatBDT(course.price)}</span>
                         <span className="text-slate-400 font-normal">
                           {course.curriculum?.length || 0} Modules
                         </span>
@@ -520,7 +530,7 @@ const StudioDashboardView = ({ eligibleTopics = [] }) => {
               <div>
                 <h2 className="text-2xl font-bold text-white">Lesson Builder & Video Manager</h2>
                 <p className="text-slate-400 text-xs mt-0.5">
-                  Uploading lesson videos automatically dispatches notifications to all enrolled students.
+                  Manage video parts and lesson materials for your courses.
                 </p>
               </div>
             </div>
@@ -587,11 +597,24 @@ const StudioDashboardView = ({ eligibleTopics = [] }) => {
 
                           <div className="flex items-center gap-2">
                             <button
+                              type="button"
+                              onClick={() => setVideoUploadLesson(l)}
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${
+                                l.videoLinks?.length > 0
+                                  ? "bg-slate-800 hover:bg-slate-700 text-rose-300 border border-slate-700"
+                                  : "bg-gradient-to-r from-rose-600 to-indigo-600 hover:from-rose-500 hover:to-indigo-500 text-white"
+                              }`}
+                            >
+                              <Youtube className="w-3.5 h-3.5" />
+                              <span>{l.videoLinks?.length > 0 ? "Manage Video" : "Upload Unlisted Video"}</span>
+                            </button>
+                            <button
                               onClick={() => {
                                 setSelectedLessonForEdit(l);
                                 setShowLessonModal(true);
                               }}
                               className="p-2 text-slate-400 hover:text-white bg-slate-800 rounded-lg"
+                              title="Edit Lesson"
                             >
                               <Edit3 className="w-4 h-4" />
                             </button>
@@ -719,12 +742,23 @@ const StudioDashboardView = ({ eligibleTopics = [] }) => {
 
         {showLessonModal && (
           <LessonEditorModal
+            courses={courses}
             courseId={selectedCourseIdForLesson}
             lesson={selectedLessonForEdit}
             onSuccess={() => {
               if (selectedCourseIdForLesson) fetchLessonsForCourse(selectedCourseIdForLesson);
             }}
             onClose={() => setShowLessonModal(false)}
+          />
+        )}
+
+        {videoUploadLesson && (
+          <YouTubeVideoUploadModal
+            lesson={videoUploadLesson}
+            onSuccess={() => {
+              if (selectedCourseIdForLesson) fetchLessonsForCourse(selectedCourseIdForLesson);
+            }}
+            onClose={() => setVideoUploadLesson(null)}
           />
         )}
 

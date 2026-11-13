@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
-import { X, BookOpen, DollarSign, Image, Lock, ShieldCheck, Sparkles, Plus, Trash2 } from "lucide-react";
+import { X, BookOpen, Image, Lock, ShieldCheck, Sparkles, Plus, Trash2 } from "lucide-react";
 import apiClient from "@/lib/apiClient";
+import { toWholeTaka } from "@/lib/money";
 
 /**
  * CourseEditorModal — Create or edit course details.
@@ -12,7 +13,11 @@ const CourseEditorModal = ({ course, eligibleTopics = [], onSuccess, onClose }) 
   const [title, setTitle] = useState(course?.title || "");
   const [topic, setTopic] = useState(course?.topic || (eligibleTopics[0] || ""));
   const [description, setDescription] = useState(course?.description || "");
-  const [price, setPrice] = useState(course?.price || 49.99);
+  const [price, setPrice] = useState(
+    course?.price !== undefined && course?.price !== null
+      ? Math.round(Number(course.price))
+      : 500
+  );
   const [thumbnailUrl, setThumbnailUrl] = useState(course?.thumbnailUrl || "");
   const [difficulty, setDifficulty] = useState(course?.difficulty || "Intermediate");
   const [language, setLanguage] = useState(course?.language || "English");
@@ -60,13 +65,21 @@ const CourseEditorModal = ({ course, eligibleTopics = [], onSuccess, onClose }) 
       return setError(`Topic Restriction Error: You are only permitted to teach in topics you completed mentoring sessions for!`);
     }
 
+    const numPrice = Number(price);
+    if (!Number.isFinite(numPrice) || numPrice < 1 || numPrice > 999999) {
+      return setError("Price must be between ৳1 and ৳999,999 BDT.");
+    }
+    if (!Number.isInteger(numPrice)) {
+      return setError("Price must be a whole Taka amount without floating-point decimals.");
+    }
+
     setLoading(true);
     try {
       const payload = {
         title: title.trim(),
         topic,
         description: description.trim(),
-        price: Number(price),
+        price: toWholeTaka(numPrice),
         thumbnailUrl: thumbnailUrl.trim(),
         difficulty,
         language,
@@ -180,17 +193,20 @@ const CourseEditorModal = ({ course, eligibleTopics = [], onSuccess, onClose }) 
           {/* Price & Thumbnail */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
-              <label className="text-xs font-semibold text-slate-300 block mb-1">Price (USD $)</label>
+              <label className="text-xs font-semibold text-slate-300 block mb-1">Price (BDT ৳)</label>
               <div className="relative">
-                <DollarSign className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                <span className="text-sm font-black text-emerald-400 absolute left-3 top-2 select-none">৳</span>
                 <input
                   type="number"
                   value={price}
                   onChange={(e) => setPrice(e.target.value)}
-                  step="0.01"
+                  step="1"
                   min="1"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-9 pr-3 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500"
+                  max="999999"
+                  placeholder="500"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-xl pl-8 pr-12 py-2.5 text-xs text-white focus:outline-none focus:border-indigo-500"
                 />
+                <span className="text-[10px] font-bold text-slate-400 absolute right-3 top-3 select-none">BDT</span>
               </div>
             </div>
 

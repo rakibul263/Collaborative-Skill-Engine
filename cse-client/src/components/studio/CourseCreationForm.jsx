@@ -2,6 +2,8 @@ import { useForm, useFieldArray } from "react-hook-form";
 import { useState } from "react";
 import { Plus, Trash2, X } from "lucide-react";
 import apiClient from "@/lib/apiClient";
+import { ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
+import { toWholeTaka } from "@/lib/money";
 
 const CourseCreationForm = ({ eligibleTopics, onSuccess, onCancel }) => {
   const [serverError, setServerError] = useState("");
@@ -21,7 +23,7 @@ const CourseCreationForm = ({ eligibleTopics, onSuccess, onCancel }) => {
         title: data.title,
         topic: data.topic,
         description: data.description,
-        price: parseFloat(data.price),
+        price: toWholeTaka(data.price),
         thumbnailUrl: data.thumbnailUrl,
         curriculum: data.curriculum.map((c) => ({ title: c.title })),
       });
@@ -95,16 +97,18 @@ const CourseCreationForm = ({ eligibleTopics, onSuccess, onCancel }) => {
         {/* Price + Thumbnail row */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className={labelClass}>Price (BDT)</label>
+            <label className={labelClass}>Price (BDT ৳)</label>
             <input
               type="number"
-              step="0.01"
+              step="1"
               min="1"
-              max="9999.99"
+              max="999999"
               {...register("price", {
                 required: "Price is required",
                 min: { value: 1, message: "Min ৳1" },
-                max: { value: 999999, message: "Max ৳9,99,999" },
+                max: { value: 999999, message: "Max ৳999,999" },
+                validate: (v) =>
+                  Number.isInteger(Number(v)) || "Whole Taka only (no decimals)",
               })}
               placeholder="৳500"
               className={inputClass}
@@ -166,7 +170,7 @@ const CourseCreationForm = ({ eligibleTopics, onSuccess, onCancel }) => {
             disabled={submitting}
             className="flex items-center gap-2 px-6 py-2.5 bg-[#1B1B4B] hover:bg-indigo-700 text-white rounded-xl text-sm font-black transition-all disabled:opacity-50"
           >
-            {submitting ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : null}
+            {submitting ? <ButtonSpinner size="sm" /> : null}
             Create Course
           </button>
           <button type="button" onClick={onCancel} className="px-4 py-2.5 text-slate-500 hover:text-slate-700 font-black text-sm transition-colors">

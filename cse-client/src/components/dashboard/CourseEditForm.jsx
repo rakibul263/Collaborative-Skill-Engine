@@ -1,8 +1,11 @@
 import { useForm, useFieldArray } from "react-hook-form";
 import { useState, useEffect } from "react";
 import { Plus, Trash2, X } from "lucide-react";
-import Swal from "sweetalert2";
+import { showConfirm } from "@/components/ui/confirm-dialog";
+import { toast } from "@/components/ui/toast-system";
 import apiClient from "@/lib/apiClient";
+import { ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
+import { toWholeTaka } from "@/lib/money";
 
 const CourseEditForm = ({ course, onSuccess, onCancel }) => {
   const [submitError, setSubmitError] = useState("");
@@ -33,13 +36,13 @@ const CourseEditForm = ({ course, onSuccess, onCancel }) => {
   const onSubmit = async (data) => {
     // If course is pending_review, warn before withdrawing from review
     if (course.status === "pending_review") {
-      const result = await Swal.fire({
-        title: "Withdraw from Review?",
-        text: "Editing this course will withdraw it from review and revert it to draft. Continue?",
-        icon: "warning",
-        showCancelButton: true,
-        confirmButtonColor: "#dc2626",
-        confirmButtonText: "Continue",
+      const result = await showConfirm({
+        variant: "warning",
+        badge: "REVIEW STATUS",
+        title: "Withdraw Course from Review?",
+        description:
+          "Editing this course while under administrative audit will withdraw it from the review queue and revert it to draft.",
+        confirmText: "Continue Editing",
       });
       if (!result.isConfirmed) return;
     }
@@ -50,23 +53,20 @@ const CourseEditForm = ({ course, onSuccess, onCancel }) => {
       const res = await apiClient.patch(`/courses/${course._id}`, {
         title: data.title,
         description: data.description,
-        price: parseFloat(data.price),
+        price: toWholeTaka(data.price),
         thumbnailUrl: data.thumbnailUrl,
         curriculum: data.curriculum.map((c) => ({ title: c.title })),
       });
       const updatedCourse = res.data;
-      // If previously approved and now re-submitted, notify instructor
       if (course.status === "approved" && updatedCourse.status === "pending_review") {
-        await Swal.fire({
-          title: "Re-submitted for Review",
-          text: "Your course has been re-submitted for admin review because changes were made to an approved course.",
-          icon: "info",
-          confirmButtonColor: "#4f46e5",
-        });
+        toast.info("Your course has been re-submitted for admin review.");
+      } else {
+        toast.success("Course changes saved successfully!");
       }
       onSuccess(updatedCourse);
     } catch {
       setSubmitError("Failed to save changes. Please try again.");
+      toast.error("Failed to save changes. Please try again.");
     } finally {
       setSubmitting(false);
     }
@@ -133,16 +133,18 @@ const CourseEditForm = ({ course, onSuccess, onCancel }) => {
         {/* Price + Thumbnail row */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <div>
-            <label className={labelClass}>Price (BDT)</label>
+            <label className={labelClass}>Price (BDT ৳)</label>
             <input
               type="number"
-              step="0.01"
+              step="1"
               min="1"
-              max="9999.99"
+              max="999999"
               {...register("price", {
                 required: "Price is required",
-                min: { value: 1.0, message: "Min ৳1.00" },
-                max: { value: 9999.99, message: "Max ৳9,999.99" },
+                min: { value: 1, message: "Min ৳1" },
+                max: { value: 999999, message: "Max ৳999,999" },
+                validate: (v) =>
+                  Number.isInteger(Number(v)) || "Whole Taka only (no decimals)",
               })}
               placeholder="৳500"
               className={inputClass}
@@ -220,9 +222,7 @@ const CourseEditForm = ({ course, onSuccess, onCancel }) => {
             disabled={submitting}
             className="flex items-center gap-2 px-6 py-2.5 bg-[#1B1B4B] hover:bg-indigo-700 text-white rounded-xl text-sm font-black transition-all disabled:opacity-50"
           >
-            {submitting ? (
-              <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-            ) : null}
+            {submitting ? <ButtonSpinner size="sm" /> : null}
             Save Changes
           </button>
           <button

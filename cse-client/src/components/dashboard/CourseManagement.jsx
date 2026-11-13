@@ -3,6 +3,8 @@ import { Pencil, BookOpen } from "lucide-react";
 import apiClient from "@/lib/apiClient";
 import CourseEditForm from "@/components/dashboard/CourseEditForm";
 import LessonManager from "@/components/dashboard/LessonManager";
+import { LoadingSpinner } from "@/components/shared/loading/LoadingSpinner";
+import { formatBDT } from "@/lib/money";
 
 export default function CourseManagement() {
   const [courses, setCourses] = useState([]);
@@ -38,7 +40,7 @@ export default function CourseManagement() {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-24">
-        <div className="w-10 h-10 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+        <LoadingSpinner size="lg" label="Loading courses..." />
       </div>
     );
   }
@@ -115,7 +117,7 @@ export default function CourseManagement() {
             <h3 className="text-sm font-bold text-slate-800 truncate">{course.title}</h3>
             <div className="flex items-center gap-2">
               {statusBadge(course.status)}
-              <span className="text-xs font-bold text-slate-500">৳{Number(course.price).toFixed(2)}</span>
+              <span className="text-xs font-bold text-slate-500">{formatBDT(course.price)}</span>
             </div>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">

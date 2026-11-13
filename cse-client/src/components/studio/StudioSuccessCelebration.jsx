@@ -1,5 +1,6 @@
 import React, { useState } from "react";
 import { Sparkles, CheckCircle2, Award, ArrowRight, ShieldCheck } from "lucide-react";
+import { ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
 
 /**
  * StudioSuccessCelebration — Premium celebration screen when user newly unlocks Studio.
@@ -34,7 +35,7 @@ const StudioSuccessCelebration = ({ onEnterStudio }) => {
               Welcome to Creator Studio!
             </h1>
             <p className="text-slate-300 text-sm sm:text-base leading-relaxed">
-              Congratulations! All your instructor requirements are fulfilled. Permanent Studio Access has been unlocked for your account in the database.
+              Congratulations! All your instructor requirements are fulfilled. Permanent Studio Access has been unlocked for your account.
             </p>
           </div>
 
@@ -65,7 +66,7 @@ const StudioSuccessCelebration = ({ onEnterStudio }) => {
             className="w-full py-4 px-6 bg-gradient-to-r from-indigo-600 to-indigo-500 hover:from-indigo-500 hover:to-indigo-400 text-white font-black text-sm uppercase tracking-wider rounded-2xl transition-all shadow-xl shadow-indigo-600/30 flex items-center justify-center gap-3"
           >
             {loading ? (
-              <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              <ButtonSpinner size="sm" />
             ) : (
               <>
                 Enter Studio Creator Dashboard

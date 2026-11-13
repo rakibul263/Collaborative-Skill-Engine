@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useForm, useFieldArray } from "react-hook-form";
 import { ArrowLeft, Plus, Pencil, Video, Trash2, X } from "lucide-react";
 import apiClient from "@/lib/apiClient";
+import { LoadingSpinner, ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
 
 // ---------------------------------------------------------------------------
 // Lesson add/edit form (rendered inline when showAddForm or editingLesson)
@@ -150,9 +151,7 @@ function LessonForm({ initialData, onSave, onCancel }) {
             disabled={submitting}
             className="flex items-center gap-2 px-5 py-2 bg-[#1B1B4B] hover:bg-indigo-700 text-white rounded-xl text-xs font-black transition-all disabled:opacity-50"
           >
-            {submitting ? (
-              <div className="w-3.5 h-3.5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-            ) : null}
+            {submitting ? <ButtonSpinner size="xs" /> : null}
             {initialData ? "Save Changes" : "Add Lesson"}
           </button>
           <button
@@ -199,7 +198,7 @@ export default function LessonManager({ courseId, onBack }) {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-24">
-        <div className="w-10 h-10 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+        <LoadingSpinner size="lg" label="Loading curriculum lessons..." />
       </div>
     );
   }

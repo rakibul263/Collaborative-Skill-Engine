@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
-import { Search, BookOpen, Users, Video, DollarSign, BarChart3, Settings, Tag, ShieldCheck, X, ArrowRight } from "lucide-react";
+import { Search, BookOpen, Users, Video, Wallet, BarChart3, Settings, Tag, ShieldCheck, Mail, X, ArrowRight } from "lucide-react";
 import { useNavigate } from "react-router-dom";
+import { formatBDT } from "@/lib/money";
 
 const CommandPaletteModal = ({ isOpen, onClose, courses = [], students = [] }) => {
   const [query, setQuery] = useState("");
@@ -25,9 +26,10 @@ const CommandPaletteModal = ({ isOpen, onClose, courses = [], students = [] }) =
 
   const quickActions = [
     { id: "nav-dash", title: "Go to Overview Dashboard", icon: BarChart3, path: "/studio/dashboard", cat: "Navigation" },
-    { id: "nav-analytics", title: "View Creator Analytics & Revenue", icon: DollarSign, path: "/studio/analytics", cat: "Navigation" },
+    { id: "nav-analytics", title: "View Creator Analytics & Revenue", icon: Wallet, path: "/studio/analytics", cat: "Navigation" },
     { id: "nav-courses", title: "Manage All Courses", icon: BookOpen, path: "/studio/courses", cat: "Navigation" },
     { id: "nav-students", title: "Manage Enrolled Students", icon: Users, path: "/studio/students", cat: "Navigation" },
+    { id: "nav-appeals", title: "Appeals Mailbox (Student Ban & Access Inquiries)", icon: Mail, path: "/studio/appeals", cat: "Navigation" },
     { id: "nav-reviews", title: "Read & Reply to Reviews", icon: ShieldCheck, path: "/studio/reviews", cat: "Navigation" },
     { id: "nav-coupons", title: "Create Discount Coupons", icon: Tag, path: "/studio/coupons", cat: "Navigation" },
     { id: "nav-logs", title: "View Creator Activity Logs", icon: Settings, path: "/studio/audit-logs", cat: "Navigation" },
@@ -127,7 +129,7 @@ const CommandPaletteModal = ({ isOpen, onClose, courses = [], students = [] }) =
                       </div>
                       <div>
                         <div className="font-semibold text-white text-xs">{course.title}</div>
-                        <div className="text-[10px] text-slate-400">{course.topic} • ${course.price}</div>
+                        <div className="text-[10px] text-slate-400">{course.topic} • {formatBDT(course.price)}</div>
                       </div>
                     </div>
                     <span className="text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400 font-mono">

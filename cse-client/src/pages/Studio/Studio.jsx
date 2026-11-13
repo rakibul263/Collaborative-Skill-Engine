@@ -4,26 +4,42 @@ import apiClient from "@/lib/apiClient";
 import StudioOnboardingView from "@/components/studio/StudioOnboardingView";
 import StudioSuccessCelebration from "@/components/studio/StudioSuccessCelebration";
 import StudioLayout from "@/components/studio/layout/StudioLayout";
+import { FullScreenLoader } from "@/components/shared/loading/LoadingSpinner";
 
 /**
- * Studio Page — Unified Studio Entry Point & Access System
- * Handles Creator Access state machine:
- * 1. Database-verified studio access -> Renders standalone <StudioLayout />.
- * 2. Newly completed eligibility requirements -> Renders <StudioSuccessCelebration />.
- * 3. Incomplete eligibility requirements -> Renders <StudioOnboardingView /> checklist.
+ * Studio Page — Unified Studio Entry Point & Access Control
+ * Strict Access Rules:
+ * 1. User must fulfill eligibility requirements (at least 1 mentoring session + rating >= 4.0),
+ *    OR have database-verified studio access.
+ * 2. If NOT eligible -> Strictly blocks entry and renders <StudioOnboardingView /> with locked state.
+ * 3. No unauthorized entrance or preview bypass permitted.
  */
 const Studio = () => {
-  const [accessStatus, setAccessStatus] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [accessStatus, setAccessStatus] = useState(() => {
+    try {
+      const cached = sessionStorage.getItem("cse_studio_access");
+      return cached ? JSON.parse(cached) : null;
+    } catch {
+      return null;
+    }
+  });
+  const [loading, setLoading] = useState(!accessStatus);
   const [error, setError] = useState("");
   const [unlockedJustNow, setUnlockedJustNow] = useState(false);
 
-  const fetchAccessStatus = useCallback(async () => {
-    setLoading(true);
+  const fetchAccessStatus = useCallback(async (isInitial = false) => {
+    if (isInitial && !accessStatus) setLoading(true);
     setError("");
     try {
       const res = await apiClient.get("/studio/access-status");
       setAccessStatus(res.data);
+      if (res.data) {
+        try {
+          sessionStorage.setItem("cse_studio_access", JSON.stringify(res.data));
+        } catch {
+          /* silent catch */
+        }
+      }
 
       // If user is eligible for the first time but hasn't claimed yet, automatically claim
       if (res.data && !res.data.hasStudioAccess && res.data.isEligible) {
@@ -31,6 +47,8 @@ const Studio = () => {
           const claimRes = await apiClient.post("/studio/claim-access", {});
           if (claimRes.data?.hasStudioAccess) {
             setUnlockedJustNow(true);
+            setAccessStatus(claimRes.data);
+            sessionStorage.setItem("cse_studio_access", JSON.stringify(claimRes.data));
           }
         } catch (claimErr) {
           console.error("Claim access error:", claimErr);
@@ -38,24 +56,24 @@ const Studio = () => {
       }
     } catch (err) {
       console.error("Fetch access status error:", err);
-      setError("Could not verify studio access status. Please try again.");
+      if (!accessStatus) {
+        setError("Could not verify studio access status. Please try again.");
+      }
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [accessStatus]);
 
   useEffect(() => {
-    fetchAccessStatus();
-  }, [fetchAccessStatus]);
+    fetchAccessStatus(true);
+  }, []);
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center p-4">
-        <div className="w-12 h-12 border-3 border-indigo-500/30 border-t-indigo-500 rounded-full animate-spin mb-4" />
-        <p className="text-slate-400 text-xs font-semibold uppercase tracking-widest animate-pulse">
-          Verifying Creator Access...
-        </p>
-      </div>
+      <FullScreenLoader
+        message="Loading Creator Studio..."
+        subtext="Preparing your workspace tools and data"
+      />
     );
   }
 
@@ -76,12 +94,12 @@ const Studio = () => {
     );
   }
 
-  // STEP 1: If user already has permanent access in DB or entered after celebration -> Show Standalone Studio Layout
+  // STEP 1: Strict Check: ONLY if user has permanent DB access or fulfilled all requirements -> Render StudioLayout
   if (accessStatus?.hasStudioAccess || (unlockedJustNow === false && accessStatus?.isEligible)) {
     return <StudioLayout />;
   }
 
-  // STEP 2: If user just newly completed eligibility requirements -> Show Success Celebration
+  // STEP 2: If user just newly completed eligibility requirements -> Show Celebration Screen
   if (unlockedJustNow) {
     return (
       <StudioSuccessCelebration
@@ -93,7 +111,7 @@ const Studio = () => {
     );
   }
 
-  // STEP 3: If user is not yet eligible -> Show Onboarding Checklist Screen
+  // STEP 3: If user has NOT fulfilled requirements -> Strictly block entrance & render locked requirements checklist
   return (
     <StudioOnboardingView
       accessStatus={accessStatus}

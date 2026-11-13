@@ -1,5 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
-import { DollarSign, RefreshCw } from "lucide-react";
+import { Wallet, RefreshCw } from "lucide-react";
+import { LoadingSpinner } from "@/components/shared/loading/LoadingSpinner";
+import { formatBDT } from "@/lib/money";
 import {
   BarChart,
   Bar,
@@ -39,7 +41,7 @@ const EarningsSection = () => {
   if (loading) {
     return (
       <div className="flex items-center justify-center py-24">
-        <div className="w-10 h-10 border-2 border-indigo-200 border-t-indigo-600 rounded-full animate-spin" />
+        <LoadingSpinner size="lg" label="Loading earnings data..." />
       </div>
     );
   }
@@ -77,14 +79,14 @@ const EarningsSection = () => {
       {/* Task 11.2 — Total earnings card (white card, green accent, matching Studio.jsx style) */}
       <div className="bg-gradient-to-br from-emerald-50 to-teal-50 border border-emerald-100 rounded-2xl p-5 flex items-center gap-4">
         <div className="w-12 h-12 bg-emerald-500 rounded-xl flex items-center justify-center">
-          <DollarSign size={22} className="text-white" />
+          <Wallet size={22} className="text-white" />
         </div>
         <div>
           <p className="text-xs font-black text-emerald-700 uppercase tracking-widest">
             Total Earnings
           </p>
           <p className="text-2xl font-black text-[#1B1B4B]">
-            ৳{totalEarnings.toFixed(2)}
+            {formatBDT(totalEarnings)}
           </p>
           <p className="text-xs text-slate-500 font-bold">
             85% of each course sale
@@ -101,8 +103,8 @@ const EarningsSection = () => {
           <BarChart data={perCourse}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey="courseTitle" tick={{ fontSize: 11 }} />
-            <YAxis tick={{ fontSize: 11 }} />
-            <Tooltip />
+            <YAxis allowDecimals={false} tick={{ fontSize: 11 }} tickFormatter={(v) => `৳${Math.round(v)}`} />
+            <Tooltip formatter={(val) => [formatBDT(val), "Earnings (BDT)"]} />
             <Bar dataKey="earnings" fill="#4f46e5" radius={[4, 4, 0, 0]} />
           </BarChart>
         </ResponsiveContainer>
@@ -117,8 +119,8 @@ const EarningsSection = () => {
           <LineChart data={monthly}>
             <CartesianGrid strokeDasharray="3 3" />
             <XAxis dataKey="month" tick={{ fontSize: 11 }} />
-            <YAxis tick={{ fontSize: 11 }} />
-            <Tooltip />
+            <YAxis allowDecimals={false} tick={{ fontSize: 11 }} tickFormatter={(v) => `৳${Math.round(v)}`} />
+            <Tooltip formatter={(val) => [formatBDT(val), "Earnings (BDT)"]} />
             <Line
               type="monotone"
               dataKey="earnings"
