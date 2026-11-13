@@ -1,0 +1,27 @@
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+firebase-debug.log
+
+# Office lock files
+~$*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+
+# Build output
+dist/
+build/
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/extensions.json
