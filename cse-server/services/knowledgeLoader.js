@@ -27,13 +27,21 @@ const loadKnowledgeDocuments = () => {
 };
 
 const inferCategory = (filename) => {
-  if (filename.includes("frontend")) return "frontend";
-  if (filename.includes("backend")) return "backend";
-  if (filename.includes("fullstack")) return "fullstack";
-  if (filename.includes("data-science")) return "data-science";
-  if (filename.includes("devops")) return "devops";
-  if (filename.includes("ai-ml")) return "ai-ml";
-  if (filename.includes("career")) return "career";
+  const f = filename.toLowerCase();
+  if (f.includes("frontend")) return "frontend";
+  if (f.includes("backend")) return "backend";
+  if (f.includes("fullstack")) return "fullstack";
+  if (f.includes("data-science")) return "data-science";
+  if (f.includes("devops") || f.includes("sre")) return "devops";
+  if (f.includes("ai") || f.includes("ml") || f.includes("learning")) return "ai-ml";
+  if (f.includes("security") || f.includes("cyber")) return "cybersecurity";
+  if (f.includes("dsa") || f.includes("algorithm") || f.includes("competitive")) return "dsa";
+  if (f.includes("system") || f.includes("embedded") || f.includes("iot")) return "systems";
+  if (f.includes("mobile") || f.includes("flutter") || f.includes("native")) return "mobile";
+  if (f.includes("database") || f.includes("storage")) return "databases";
+  if (f.includes("cloud") || f.includes("design")) return "system-design";
+  if (f.includes("blockchain") || f.includes("web3")) return "blockchain";
+  if (f.includes("career")) return "career";
   return "skills";
 };
 

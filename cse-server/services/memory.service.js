@@ -173,6 +173,7 @@ const saveAdvisorTurn = async (
     recommendedSkills: responsePayload.recommendedSkills,
     prioritySteps: responsePayload.prioritySteps,
     mentorSuggestions: responsePayload.mentorSuggestions,
+    courseSuggestions: responsePayload.courseSuggestions || [],
     retrievedSources: responsePayload.retrievedSources || [],
     createdAt: now,
   };

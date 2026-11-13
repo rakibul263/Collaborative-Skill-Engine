@@ -637,6 +637,7 @@ export function generateCareerIntelligence(profile, latestResponse) {
     nextBestAction,
     careerDirections,
     masteredSkills: currentSkills,
+    currentSkills,
     missingGaps,
     roadmap,
     strengths,

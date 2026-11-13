@@ -129,14 +129,17 @@ const retrieveRelevantDocuments = async ({
   return { chunks, query };
 };
 
-const keywordFallbackRetrieve = ({ goal, teachSkills, learnSkills }) => {
+const keywordFallbackRetrieve = ({ goal, message, teachSkills = [], learnSkills = [] }) => {
   const rawDocs = loadKnowledgeDocuments();
   const terms = [
-    goal,
+    goal || "",
+    message || "",
     ...teachSkills,
     ...learnSkills,
     "roadmap",
     "career",
+    "algorithms",
+    "systems",
   ]
     .join(" ")
     .toLowerCase();
@@ -148,11 +151,17 @@ const keywordFallbackRetrieve = ({ goal, teachSkills, learnSkills }) => {
       if (goal && text.includes(goal.toLowerCase().split(" ")[0])) {
         score += 3;
       }
+      if (message) {
+        const words = message.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+        words.forEach((w) => {
+          if (text.includes(w)) score += 2;
+        });
+      }
       for (const skill of [...teachSkills, ...learnSkills]) {
         if (skill && text.includes(skill.toLowerCase())) score += 2;
       }
       if (doc.metadata.category && terms.includes(doc.metadata.category)) {
-        score += 1;
+        score += 2;
       }
       return { doc, score };
     })
