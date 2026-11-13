@@ -1,5 +1,7 @@
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 require("dotenv").config();
+const { validateEnv } = require("./utils/validateEnv");
+validateEnv();
 const express = require("express");
 const cors = require("cors");
 const Fuse = require("fuse.js");
@@ -16,10 +18,19 @@ const { registerAdminRoutes } = require("./routes/admin.routes");
 const { registerDashboardRoutes } = require("./routes/dashboard.routes");
 const { registerStudioRoutes } = require("./routes/studio.routes");
 const { registerCvParserRoutes } = require("./routes/cvParser.routes");
+const { registerSkillGraphRoutes } = require("./routes/skillGraph.routes");
+const { registerTeamsRoutes } = require("./routes/teams.routes");
+const { registerHybridMentorRoutes } = require("./routes/hybridMentor.routes");
+const { registerCodeExecutionRoutes } = require("./routes/codeExecution.routes");
+const { registerPaymentRoutes } = require("./routes/payment.routes");
 const { initVectorStore } = require("./services/vectorRetrieval.service");
 const { initFirebaseAdmin } = require("./config/firebaseAdmin");
 const cloudinary = require("cloudinary").v2;
 const crypto = require("crypto");
+const { initIpBlocker, isIpBlocked } = require("./utils/ipBlocker");
+const { parseClientIp } = require("./utils/deviceParser");
+const { detectReviewFraud, sanitizeIp } = require("./utils/geoSecurity");
+const { securityHeaders } = require("./middleware/securityHeaders");
 
 // ── Cloudinary initialisation (server-side; used only for deletion of old images)
 cloudinary.config({
@@ -61,11 +72,28 @@ const corsConfig = {
   credentials: true,
 };
 
+app.use(securityHeaders);
 app.use(
   cors(corsConfig),
 );
 app.use(express.json({ limit: "10mb" }));
 app.use(cookieParser());
+
+// ── Global IP restriction middleware ──
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS") return next();
+  if (req.path.startsWith("/admin-api")) return next();
+
+  const clientIp = parseClientIp(req);
+  if (isIpBlocked(clientIp)) {
+    return res.status(403).json({
+      blocked: true,
+      ip: clientIp,
+      message: "Access Denied: Your IP address has been restricted by platform administration.",
+    });
+  }
+  next();
+});
 
 const io = new Server(httpServer, {
   cors: corsConfig,
@@ -95,29 +123,46 @@ const createFuse = (skills) => {
 let client;
 
 async function run() {
-  try {
-    const uri = process.env.MONGODB_URI;
-    if (!uri) {
-      console.error("MONGODB_URI not set in .env file");
-      process.exit(1);
-    }
-    client = new MongoClient(uri, {
-      serverApi: {
-        version: ServerApiVersion.v1,
-        strict: true,
-        deprecationErrors: true,
-      },
-      maxPoolSize: 50,
-      minPoolSize: 5,
-      connectTimeoutMS: 30000,
-      socketTimeoutMS: 45000,
-      serverSelectionTimeoutMS: 10000,
-      heartbeatFrequencyMS: 10000,
-      retryWrites: true,
-      retryReads: true,
-    });
-    await client.connect();
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    console.error("MONGODB_URI not set in .env file");
+    process.exit(1);
+  }
 
+  let connected = false;
+  let attempts = 0;
+  while (!connected && attempts < 15) {
+    attempts++;
+    try {
+      client = new MongoClient(uri, {
+        serverApi: {
+          version: ServerApiVersion.v1,
+          strict: true,
+          deprecationErrors: true,
+        },
+        maxPoolSize: 50,
+        minPoolSize: 5,
+        connectTimeoutMS: 30000,
+        socketTimeoutMS: 45000,
+        serverSelectionTimeoutMS: 15000,
+        heartbeatFrequencyMS: 10000,
+        retryWrites: true,
+        retryReads: true,
+      });
+      await client.connect();
+      connected = true;
+      console.log(`MongoDB Connected successfully (attempt ${attempts})`);
+    } catch (err) {
+      console.error(`MongoDB connection attempt ${attempts} failed:`, err.message);
+      if (attempts >= 15) {
+        console.error("Exhausted all MongoDB connection attempts. Please check network/URI.");
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+  }
+
+  try {
     const { verifyJWT } = require("./middleware/verifyJWT");
 
     const db = client.db("skillEngineDB");
@@ -133,9 +178,18 @@ async function run() {
     const coursesCollection = db.collection("courses");
     const courseEnrollmentsCollection = db.collection("course_enrollments");
     const lessonsCollection = db.collection("lessons");
+    const lessonProgressCollection = db.collection("lesson_progress");
+    const courseCertificatesCollection = db.collection("course_certificates");
     const courseReviewsCollection = db.collection("course_reviews");
     const courseCouponsCollection = db.collection("course_coupons");
+    const courseAppealsCollection = db.collection("course_appeals");
+    const adminDisputesCollection = db.collection("admin_disputes");
     const studioAuditLogsCollection = db.collection("studio_audit_logs");
+    const adminAuditLogsCollection = db.collection("admin_audit_logs");
+    const userLoginLogsCollection = db.collection("user_login_logs");
+    const blockedIpsCollection = db.collection("blocked_ips");
+    const teamsCollection = db.collection("teams");
+    const adminSecurityAlertsCollection = db.collection("admin_security_alerts");
 
     await connectionRequestsCollection.createIndex(
       { senderEmail: 1, receiverEmail: 1, status: 1 },
@@ -153,14 +207,33 @@ async function run() {
       { unique: true },
     );
     await ratingsCollection.createIndex({ targetEmail: 1, createdAt: -1 });
+    await ratingsCollection.createIndex({ fraudStatus: 1, rating: -1 });
     await aiAdvisorSessionsCollection.createIndex({ userEmail: 1, createdAt: -1 });
     await schedulesCollection.createIndex({ conversationId: 1, status: 1 });
     await schedulesCollection.createIndex({ startTime: 1, status: 1 });
     await userNotificationsCollection.createIndex({ recipientEmail: 1, createdAt: -1 });
     await userNotificationsCollection.createIndex({ recipientEmail: 1, isRead: 1 });
+    await courseAppealsCollection.createIndex({ courseId: 1, learnerEmail: 1, createdAt: -1 });
+    await courseAppealsCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
+    await courseAppealsCollection.createIndex({ enrollmentId: 1 });
+    await adminDisputesCollection.createIndex({ courseId: 1, createdAt: -1 });
+
+    // High performance indexes for Users, Admin Telemetry & Audits
+    await usersCollection.createIndex({ email: 1 });
+    await usersCollection.createIndex({ role: 1 });
+    await usersCollection.createIndex({ createdAt: -1 });
+    await usersCollection.createIndex({ isDeactivated: 1 });
+    await usersCollection.createIndex({ teachSkills: 1 });
+    await usersCollection.createIndex({ learnSkills: 1 });
+    await usersCollection.createIndex({ role: 1, isDeactivated: 1 });
+    await adminAuditLogsCollection.createIndex({ timestamp: -1 });
+    await schedulesCollection.createIndex({ schedulerEmail: 1, status: 1 });
 
     await coursesCollection.createIndex({ instructorEmail: 1, status: 1 });
     await coursesCollection.createIndex({ status: 1 });
+    await coursesCollection.createIndex({ createdAt: -1 });
+    await coursesCollection.createIndex({ status: 1, createdAt: -1 });
+    await coursesCollection.createIndex({ status: 1, category: 1 });
     await coursesCollection.createIndex(
       { instructorEmail: 1, topic: 1 },
       { unique: true }
@@ -171,13 +244,45 @@ async function run() {
     );
     await courseEnrollmentsCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
     await courseEnrollmentsCollection.createIndex({ createdAt: -1 });
+    await courseEnrollmentsCollection.createIndex({ learnerEmail: 1, status: 1 });
     await lessonsCollection.createIndex({ courseId: 1, order: 1 });
+    await lessonProgressCollection.createIndex({ learnerEmail: 1, courseId: 1 });
+    await lessonProgressCollection.createIndex(
+      { learnerEmail: 1, lessonId: 1, videoKey: 1 },
+      { unique: true }
+    );
+    await courseCertificatesCollection.createIndex(
+      { courseId: 1, learnerEmail: 1 },
+      { unique: true }
+    );
+    await courseCertificatesCollection.createIndex(
+      { certificateCode: 1 },
+      { unique: true }
+    );
+    await courseCertificatesCollection.createIndex({ certHash: 1 });
+    await courseCertificatesCollection.createIndex({ learnerEmail: 1, issuedAt: -1 });
     await courseReviewsCollection.createIndex({ courseId: 1, createdAt: -1 });
+    await courseReviewsCollection.createIndex({ rating: -1 });
     await courseCouponsCollection.createIndex({ instructorEmail: 1, code: 1 });
+    await userLoginLogsCollection.createIndex({ timestamp: -1 });
+    await userLoginLogsCollection.createIndex({ email: 1, timestamp: -1 });
+    await userLoginLogsCollection.createIndex({ ip: 1 });
+    await blockedIpsCollection.createIndex({ ip: 1 }, { unique: true });
+    await teamsCollection.createIndex({ leaderEmail: 1 });
+    await teamsCollection.createIndex({ "members.email": 1 });
+    await teamsCollection.createIndex({ createdAt: -1 });
+    await adminSecurityAlertsCollection.createIndex({ timestamp: -1 });
+    await adminSecurityAlertsCollection.createIndex({ type: 1, status: 1 });
+    await initIpBlocker(blockedIpsCollection);
 
     initFirebaseAdmin();
 
-    registerAuthRoutes(app, { usersCollection });
+    registerAuthRoutes(app, {
+      usersCollection,
+      userLoginLogsCollection,
+      adminSecurityAlertsCollection,
+      io,
+    });
 
     registerNotificationRoutes(app, { notificationsCollection, io });
 
@@ -192,9 +297,17 @@ async function run() {
       schedulesCollection,
       userNotificationsCollection,
       lessonsCollection,
+      lessonProgressCollection,
+      courseCertificatesCollection,
+      courseAppealsCollection,
+      adminDisputesCollection,
+      adminAuditLogsCollection,
+      courseReviewsCollection,
+      adminSecurityAlertsCollection,
       io,
     });
     registerAdminRoutes(app, {
+      db,
       usersCollection,
       coursesCollection,
       courseEnrollmentsCollection,
@@ -202,6 +315,13 @@ async function run() {
       schedulesCollection,
       userNotificationsCollection,
       lessonsCollection,
+      adminAuditLogsCollection,
+      adminDisputesCollection,
+      courseAppealsCollection,
+      userLoginLogsCollection,
+      blockedIpsCollection,
+      adminSecurityAlertsCollection,
+      courseReviewsCollection,
       io,
     });
 
@@ -210,6 +330,7 @@ async function run() {
       courseEnrollmentsCollection,
       usersCollection,
       lessonsCollection,
+      userNotificationsCollection,
       io,
     });
 
@@ -217,17 +338,42 @@ async function run() {
       usersCollection,
       coursesCollection,
       courseEnrollmentsCollection,
+      courseCertificatesCollection,
       lessonsCollection,
+      lessonProgressCollection,
       ratingsCollection,
       schedulesCollection,
       userNotificationsCollection,
       courseReviewsCollection,
       courseCouponsCollection,
+      courseAppealsCollection,
       studioAuditLogsCollection,
       io,
     });
 
     registerCvParserRoutes(app);
+    registerSkillGraphRoutes(app, {
+      usersCollection,
+      coursesCollection,
+      ratingsCollection,
+    });
+    registerTeamsRoutes(app, {
+      usersCollection,
+      schedulesCollection,
+      teamsCollection,
+      conversationsCollection,
+      messagesCollection,
+      userNotificationsCollection,
+      io,
+    });
+    registerHybridMentorRoutes(app, { usersCollection, ratingsCollection });
+    registerCodeExecutionRoutes(app);
+    registerPaymentRoutes(app, {
+      coursesCollection,
+      courseEnrollmentsCollection,
+      userNotificationsCollection,
+      io,
+    });
 
     // ===== Cloudinary Signed Upload =====
     // Generates a server-side signature so the client can upload directly to
@@ -347,6 +493,7 @@ async function run() {
       conversationsCollection,
       messagesCollection,
       aiAdvisorSessionsCollection,
+      coursesCollection,
     });
 
     initVectorStore()
@@ -390,7 +537,7 @@ async function run() {
     const ensureConversationMembership = async (conversationId, email) => {
       const conversation = await conversationsCollection.findOne(
         { _id: new ObjectId(conversationId) },
-        { projection: { participants: 1 } },
+        { projection: { participants: 1, isGroup: 1, groupName: 1, groupTopic: 1, teamId: 1, leaderEmail: 1 } },
       );
       if (!conversation) return { conversation: null, otherEmail: null };
       if (!conversation.participants.includes(email)) {
@@ -400,20 +547,36 @@ async function run() {
       return { conversation, otherEmail };
     };
 
-    const formatConversation = (conversation, peer, currentUserEmail) => ({
-      _id: conversation._id.toString(),
-      participants: conversation.participants,
-      peer: {
-        email: peer?.email,
-        fullName: peer?.fullName || peer?.name || "Unknown",
-        profileImage: peer?.profileImage || peer?.image || "",
-      },
-      lastMessage: conversation.lastMessage || null,
-      lastMessageAt: conversation.lastMessageAt || conversation.createdAt,
-      unreadCount: conversation.unreadCounts?.[currentUserEmail] || 0,
-      createdAt: conversation.createdAt,
-      updatedAt: conversation.updatedAt,
-    });
+    const formatConversation = (conversation, peer, currentUserEmail) => {
+      const isGroup = Boolean(conversation.isGroup);
+      return {
+        _id: conversation._id.toString(),
+        participants: conversation.participants,
+        isGroup,
+        groupName: conversation.groupName || null,
+        groupTopic: conversation.groupTopic || null,
+        teamId: conversation.teamId ? conversation.teamId.toString() : null,
+        peer: isGroup
+          ? {
+              email: conversation.leaderEmail || "group",
+              fullName: conversation.groupName || "Project Squad",
+              profileImage: conversation.groupImage || "",
+              isGroup: true,
+              memberCount: conversation.participants?.length || 0,
+            }
+          : {
+              email: peer?.email,
+              fullName: peer?.fullName || peer?.name || "Unknown",
+              profileImage: peer?.profileImage || peer?.image || "",
+              isGroup: false,
+            },
+        lastMessage: conversation.lastMessage || null,
+        lastMessageAt: conversation.lastMessageAt || conversation.createdAt,
+        unreadCount: conversation.unreadCounts?.[currentUserEmail] || 0,
+        createdAt: conversation.createdAt,
+        updatedAt: conversation.updatedAt,
+      };
+    };
 
     const serializeMessage = (message) => ({
       ...message,
@@ -443,24 +606,31 @@ async function run() {
         conversationId,
         senderEmail,
       );
-      if (!conversation || !otherEmail) {
+      if (!conversation || (!otherEmail && !conversation.isGroup)) {
         throw new Error("You are not allowed to message in this conversation");
       }
 
-      const stillConnected = await isConnectedPair(senderEmail, otherEmail);
-      if (!stillConnected) {
-        throw new Error("You can only message connected users");
+      if (!conversation.isGroup) {
+        const stillConnected = await isConnectedPair(senderEmail, otherEmail);
+        if (!stillConnected) {
+          throw new Error("You can only message connected users");
+        }
       }
 
-      const receiverOnline = onlineUsers.has(otherEmail);
+      const otherParticipants = (conversation.participants || []).filter(
+        (p) => p !== senderEmail
+      );
+      const isAnyReceiverOnline = otherParticipants.some((p) => onlineUsers.has(p));
       const now = new Date().toISOString();
       const messageDoc = {
         conversationId: conversation._id,
         senderEmail,
-        receiverEmail: otherEmail,
+        receiverEmail: conversation.isGroup ? "group" : (otherEmail || "group"),
+        isGroup: Boolean(conversation.isGroup),
+        groupName: conversation.groupName || null,
         text: cleanText,
         imageData: hasImage ? cleanImageData : "",
-        status: receiverOnline ? "delivered" : "sent",
+        status: isAnyReceiverOnline ? "delivered" : "sent",
         createdAt: now,
         updatedAt: now,
         seenAt: null,
@@ -471,6 +641,11 @@ async function run() {
         ...messageDoc,
         _id: insertResult.insertedId,
       };
+
+      const unreadUpdates = {};
+      otherParticipants.forEach((p) => {
+        unreadUpdates[`unreadCounts.${p}`] = 1;
+      });
 
       await conversationsCollection.updateOne(
         { _id: conversation._id },
@@ -484,9 +659,7 @@ async function run() {
             lastMessageAt: now,
             updatedAt: now,
           },
-          $inc: {
-            [`unreadCounts.${otherEmail}`]: 1,
-          },
+          ...(Object.keys(unreadUpdates).length > 0 ? { $inc: unreadUpdates } : {}),
         },
       );
 
@@ -496,7 +669,46 @@ async function run() {
         serialized,
       );
       io.to(`user:${senderEmail}`).emit("conversation:updated");
-      io.to(`user:${otherEmail}`).emit("conversation:updated");
+      otherParticipants.forEach((p) => {
+        io.to(`user:${p}`).emit("conversation:updated");
+      });
+
+      // Broadcast real-time message notification popup and sound
+      try {
+        let senderName = senderEmail.split("@")[0];
+        let senderImage = "";
+        const senderDoc = await usersCollection.findOne(
+          { email: senderEmail },
+          { projection: { name: 1, fullName: 1, image: 1, profileImage: 1 } },
+        );
+        if (senderDoc) {
+          senderName = senderDoc.fullName || senderDoc.name || senderName;
+          senderImage = senderDoc.profileImage || senderDoc.image || "";
+        }
+
+        const popupPayload = {
+          type: "chat_message",
+          title: conversation.isGroup
+            ? `[${conversation.groupName || "Team Squad"}] ${senderName}`
+            : `SMS from ${senderName}`,
+          message: cleanText || (hasImage ? "Sent an image" : "New message"),
+          senderName,
+          senderEmail,
+          senderImage,
+          conversationId: conversation._id.toString(),
+          actionUrl: `/message?conversationId=${conversation._id.toString()}`,
+          isGroup: Boolean(conversation.isGroup),
+          groupName: conversation.groupName || null,
+          createdAt: now,
+        };
+
+        otherParticipants.forEach((receiver) => {
+          io.to(`user:${receiver}`).emit("message:popup", popupPayload);
+          io.to(`user:${receiver.toLowerCase()}`).emit("message:popup", popupPayload);
+        });
+      } catch (err) {
+        // non-blocking
+      }
 
       return serialized;
     };
@@ -538,19 +750,37 @@ async function run() {
     };
 
     io.on("connection", (socket) => {
-      socket.on("presence:join", ({ email }) => {
-        if (!email) return;
-        socket.data.email = email;
-        socket.join(`user:${email}`);
-        if (!onlineUsers.has(email)) {
-          onlineUsers.set(email, new Set());
+      // Immediately send current list of online users to newly connected socket
+      socket.emit("presence:online-users", getOnlineEmails());
+
+      const handleUserJoin = (rawEmail) => {
+        if (!rawEmail) return;
+        const cleanEmail = String(rawEmail).trim();
+        const lowerEmail = cleanEmail.toLowerCase();
+        socket.data.email = cleanEmail;
+        socket.data.lowerEmail = lowerEmail;
+        socket.join(`user:${cleanEmail}`);
+        socket.join(`user:${lowerEmail}`);
+
+        if (!onlineUsers.has(lowerEmail)) {
+          onlineUsers.set(lowerEmail, new Set());
         }
-        onlineUsers.get(email).add(socket.id);
+        onlineUsers.get(lowerEmail).add(socket.id);
         emitOnlineUsers();
+      };
+
+      socket.on("presence:join", ({ email }) => {
+        handleUserJoin(email);
+      });
+
+      socket.on("presence:heartbeat", ({ email }) => {
+        handleUserJoin(email);
       });
 
       socket.on("presence:leave", ({ email }) => {
-        const targetEmail = email || socket.data?.email;
+        const targetEmail = (email || socket.data?.lowerEmail || socket.data?.email || "")
+          .toLowerCase()
+          .trim();
         if (!targetEmail || !onlineUsers.has(targetEmail)) return;
         const socketSet = onlineUsers.get(targetEmail);
         socketSet.delete(socket.id);
@@ -571,6 +801,44 @@ async function run() {
           socket.join(`conversation:${conversationId}`);
         } catch (error) {
           // ignore socket room join errors to avoid crashing realtime channel
+        }
+      });
+
+      socket.on("conversation:typing", ({ conversationId, recipientEmail, isTyping, userEmail, userName }) => {
+        try {
+          if (!conversationId) return;
+          const typingPayload = {
+            conversationId,
+            isTyping: Boolean(isTyping),
+            userEmail: userEmail || socket.data?.email,
+            userName: userName || socket.data?.email?.split("@")[0] || "Someone",
+          };
+          socket.to(`conversation:${conversationId}`).emit("conversation:typing", typingPayload);
+          if (recipientEmail) {
+            const target = String(recipientEmail).trim();
+            io.to(`user:${target}`).emit("conversation:typing", typingPayload);
+            io.to(`user:${target.toLowerCase()}`).emit("conversation:typing", typingPayload);
+          }
+        } catch {
+          // ignore
+        }
+      });
+
+      socket.on("appeal:typing", ({ appealId, recipientEmail, isTyping, userEmail, userName, role }) => {
+        try {
+          if (!recipientEmail) return;
+          const target = String(recipientEmail).trim();
+          const typingPayload = {
+            appealId,
+            isTyping: Boolean(isTyping),
+            userEmail: userEmail || socket.data?.email,
+            userName: userName || "User",
+            role: role || "user",
+          };
+          io.to(`user:${target}`).emit("appeal:typing", typingPayload);
+          io.to(`user:${target.toLowerCase()}`).emit("appeal:typing", typingPayload);
+        } catch {
+          // ignore
         }
       });
 
@@ -738,15 +1006,83 @@ async function run() {
         });
       });
 
+      // ─── Real-time Live Code Pairing (Monaco + Yjs CRDT & Cursors) ───
+      socket.on("code:join-room", ({ roomId, user }) => {
+        if (!roomId) return;
+        const roomName = `code-room:${roomId}`;
+        socket.join(roomName);
+        socket.to(roomName).emit("code:peer-joined", {
+          socketId: socket.id,
+          user: user || { email: socket.data.email },
+        });
+      });
+
+      socket.on("code:leave-room", ({ roomId, user }) => {
+        if (!roomId) return;
+        const roomName = `code-room:${roomId}`;
+        socket.leave(roomName);
+        socket.to(roomName).emit("code:peer-left", {
+          socketId: socket.id,
+          user: user || { email: socket.data.email },
+        });
+      });
+
+      socket.on("code:yjs-update", ({ roomId, update, user }) => {
+        if (!roomId || !update) return;
+        socket.to(`code-room:${roomId}`).emit("code:yjs-update", {
+          update,
+          user,
+        });
+      });
+
+      socket.on("code:cursor", ({ roomId, cursor, user }) => {
+        if (!roomId || !cursor) return;
+        socket.to(`code-room:${roomId}`).emit("code:cursor", {
+          cursor,
+          user: user || { email: socket.data.email },
+          socketId: socket.id,
+        });
+      });
+
+      socket.on("code:language-change", ({ roomId, language, user }) => {
+        if (!roomId || !language) return;
+        socket.to(`code-room:${roomId}`).emit("code:language-change", {
+          language,
+          user,
+        });
+      });
+
+      socket.on("code:sync-state", ({ roomId, targetSocketId, docState, language }) => {
+        if (!targetSocketId || !docState) return;
+        io.to(targetSocketId).emit("code:sync-state", {
+          docState,
+          language,
+        });
+      });
+
+      socket.on("code:execution-output", ({ roomId, output, error, language, user, durationMs }) => {
+        if (!roomId) return;
+        socket.to(`code-room:${roomId}`).emit("code:execution-output", {
+          output,
+          error,
+          language,
+          user,
+          durationMs,
+        });
+      });
+
       socket.on("disconnect", () => {
-        const email = socket.data?.email;
-        if (!email || !onlineUsers.has(email)) return;
-        const socketSet = onlineUsers.get(email);
-        socketSet.delete(socket.id);
-        if (socketSet.size === 0) {
-          onlineUsers.delete(email);
+        const targetEmail =
+          socket.data?.lowerEmail ||
+          (socket.data?.email ? socket.data.email.toLowerCase().trim() : "");
+        if (targetEmail && onlineUsers.has(targetEmail)) {
+          const socketSet = onlineUsers.get(targetEmail);
+          socketSet.delete(socket.id);
+          if (socketSet.size === 0) {
+            onlineUsers.delete(targetEmail);
+          }
+          emitOnlineUsers();
         }
-        emitOnlineUsers();
       });
     });
 
@@ -1435,7 +1771,10 @@ async function run() {
         await messagesCollection.updateMany(
           {
             conversationId: conversation._id,
-            receiverEmail: viewerEmail,
+            $or: [
+              { receiverEmail: viewerEmail },
+              { receiverEmail: "group", senderEmail: { $ne: viewerEmail } },
+            ],
             seenAt: null,
           },
           { $set: { seenAt: now, status: "seen", updatedAt: now } },
@@ -1457,7 +1796,9 @@ async function run() {
           seenAt: now,
         });
         io.to(`user:${viewerEmail}`).emit("conversation:updated");
-        io.to(`user:${otherEmail}`).emit("conversation:updated");
+        if (otherEmail && !conversation.isGroup) {
+          io.to(`user:${otherEmail}`).emit("conversation:updated");
+        }
 
         return res.send({ message: "Seen status updated" });
       } catch (error) {
@@ -1492,6 +1833,18 @@ async function run() {
             .send({ message: "Rating allowed only for connected users" });
         }
 
+        const clientIp = req.headers["x-forwarded-for"] || req.socket.remoteAddress || req.ip || "127.0.0.1";
+
+        // Sybil Review Fraud Detection
+        const fraudCheck = await detectReviewFraud({
+          ratingsCollection,
+          ip: clientIp,
+          reviewerEmail,
+          targetIdOrEmail: targetEmail,
+          rating: numericRating,
+          isCourse: false,
+        });
+
         const now = new Date().toISOString();
         await ratingsCollection.updateOne(
           { reviewerEmail, targetEmail },
@@ -1499,6 +1852,9 @@ async function run() {
             $set: {
               rating: numericRating,
               review: review.trim(),
+              reviewerIp: sanitizeIp(clientIp),
+              fraudStatus: fraudCheck.isFraud ? "QUARANTINED" : "APPROVED",
+              quarantineReason: fraudCheck.isFraud ? fraudCheck.reason : null,
               updatedAt: now,
             },
             $setOnInsert: {
@@ -1510,9 +1866,32 @@ async function run() {
           { upsert: true },
         );
 
+        if (fraudCheck.isFraud && adminSecurityAlertsCollection) {
+          const alertDoc = {
+            type: "REVIEW_FRAUD_RING",
+            severity: fraudCheck.severity || "HIGH",
+            status: "AUTO_QUARANTINED",
+            targetType: "mentor",
+            targetId: targetEmail,
+            targetName: targetEmail,
+            reviewerEmail,
+            reviewerIp: sanitizeIp(clientIp),
+            rating: numericRating,
+            reviewText: review.trim(),
+            ringAccounts: fraudCheck.ringAccounts,
+            details: fraudCheck.reason,
+            timestamp: new Date(),
+            createdAt: now,
+          };
+          await adminSecurityAlertsCollection.insertOne(alertDoc).catch(() => {});
+          if (io) {
+            io.emit("admin-security:new-alert", alertDoc);
+          }
+        }
+
         const [summary] = await ratingsCollection
           .aggregate([
-            { $match: { targetEmail } },
+            { $match: { targetEmail, fraudStatus: { $ne: "QUARANTINED" } } },
             {
               $group: {
                 _id: "$targetEmail",
@@ -1524,7 +1903,10 @@ async function run() {
           .toArray();
 
         return res.send({
-          message: "Rating submitted",
+          message: fraudCheck.isFraud
+            ? "Rating submitted for verification"
+            : "Rating submitted",
+          quarantined: fraudCheck.isFraud,
           summary: {
             averageRating: Number((summary?.averageRating || 0).toFixed(1)),
             totalRatings: summary?.totalRatings || 0,
@@ -1544,7 +1926,7 @@ async function run() {
       try {
         const [summary] = await ratingsCollection
           .aggregate([
-            { $match: { targetEmail } },
+            { $match: { targetEmail, fraudStatus: { $ne: "QUARANTINED" } } },
             {
               $group: {
                 _id: "$targetEmail",
@@ -1624,29 +2006,54 @@ async function run() {
       }
     });
 
-    // ================= PLATFORM STATS =================
+    // ================= PLATFORM STATS (FAST IN-MEMORY CACHE & 100% REAL DB METRICS) =================
+
+    let platformStatsCache = null;
+    let platformStatsExpiresAt = 0;
 
     app.get("/platform-stats", async (req, res) => {
       try {
-        const [totalUsers, totalConnections, totalMessages, topExperts] =
-          await Promise.all([
-            usersCollection.countDocuments(),
-            connectionRequestsCollection.countDocuments({ status: "pending" }),
-            messagesCollection.countDocuments(),
-            ratingsCollection
-              .aggregate([
-                {
-                  $group: {
-                    _id: "$targetEmail",
-                    averageRating: { $avg: "$rating" },
-                    totalRatings: { $sum: 1 },
-                  },
+        if (platformStatsCache && Date.now() < platformStatsExpiresAt) {
+          return res.json(platformStatsCache);
+        }
+
+        const [
+          totalUsers,
+          totalConnections,
+          totalMessages,
+          totalCourses,
+          overallRatingDoc,
+          topExperts,
+        ] = await Promise.all([
+          usersCollection.countDocuments(),
+          connectionRequestsCollection.countDocuments({ status: "pending" }),
+          messagesCollection.countDocuments(),
+          coursesCollection.countDocuments({ status: { $in: ["approved", "active"] } }),
+          ratingsCollection
+            .aggregate([
+              { $match: { fraudStatus: { $ne: "QUARANTINED" } } },
+              { $group: { _id: null, avgRating: { $avg: "$rating" }, totalRatings: { $sum: 1 } } },
+            ])
+            .toArray(),
+          ratingsCollection
+            .aggregate([
+              {
+                $group: {
+                  _id: "$targetEmail",
+                  averageRating: { $avg: "$rating" },
+                  totalRatings: { $sum: 1 },
                 },
-                { $sort: { averageRating: -1, totalRatings: -1 } },
-                { $limit: 6 },
-              ])
-              .toArray(),
-          ]);
+              },
+              { $sort: { averageRating: -1, totalRatings: -1 } },
+              { $limit: 6 },
+            ])
+            .toArray(),
+        ]);
+
+        const averageRating = overallRatingDoc[0]?.avgRating
+          ? Number(overallRatingDoc[0].avgRating.toFixed(1))
+          : 5.0;
+        const totalRatings = overallRatingDoc[0]?.totalRatings || 0;
 
         // Enrich top experts with user data
         const expertEmails = topExperts.map((e) => e._id);
@@ -1708,12 +2115,20 @@ async function run() {
           experts = [...experts, ...mappedAdditional];
         }
 
-        return res.json({
+        const payload = {
           totalUsers,
           totalConnections,
           totalMessages,
+          totalCourses,
+          averageRating,
+          totalRatings,
           experts,
-        });
+        };
+
+        platformStatsCache = payload;
+        platformStatsExpiresAt = Date.now() + 30000; // 30-second TTL cache
+
+        return res.json(payload);
       } catch (error) {
         return res.status(500).json({ message: "Failed to fetch stats" });
       }
@@ -2054,10 +2469,10 @@ async function run() {
             }
           }
 
-          if (matchCount > 0) {
-            const percentage = Math.round(
-              (matchCount / learnSkills.length) * 100,
-            );
+          if (matchCount > 0 || learnSkills.length === 0) {
+            const percentage = learnSkills.length > 0
+              ? Math.round((matchCount / learnSkills.length) * 100)
+              : Math.min(85 + (teachSkills.length * 3), 98);
 
             const isConnected = (currentUser.connections || []).some(
               (connection) => connection.email === user.email,
@@ -2071,13 +2486,16 @@ async function run() {
 
             results.push({
               _id: user._id,
-              fullName: user.fullName,
+              fullName: user.fullName || user.name || "Expert Mentor",
               email: user.email,
-              profileImage: user.profileImage,
-              education: user.education,
-              teachLevel: user.teachLevel,
-              learnLevel: user.learnLevel,
-              teachSkills: user.teachSkills,
+              profileImage: user.profileImage || user.photoURL,
+              bio: user.bio || user.about || "",
+              headline: user.headline || user.designation || "",
+              education: user.education || "Verified Practitioner",
+              teachLevel: user.teachLevel || "Expert",
+              learnLevel: user.learnLevel || "Learner",
+              teachSkills: user.teachSkills || [],
+              learnSkills: user.learnSkills || [],
               connectionStatus,
               requestId: requestInfo?.requestId || null,
               averageRating: ratingMap.get(user.email)?.averageRating || 0,
@@ -2086,7 +2504,7 @@ async function run() {
               matchCount,
               matchPercentage: percentage,
               matchedSkills,
-              score: totalScore / matchCount,
+              score: matchCount > 0 ? totalScore / matchCount : 1,
             });
           }
         }

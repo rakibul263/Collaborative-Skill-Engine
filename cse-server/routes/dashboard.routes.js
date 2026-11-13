@@ -1,11 +1,13 @@
 const { ObjectId } = require("mongodb");
 const { verifyJWT } = require("../middleware/verifyJWT");
+const { CURRENCY_CODE, fromPoisha, resolveEnrollmentPoisha } = require("../utils/money");
 
 const registerDashboardRoutes = (app, {
   coursesCollection,
   courseEnrollmentsCollection,
   usersCollection,
   lessonsCollection,
+  userNotificationsCollection = null,
   io,
 }) => {
 
@@ -91,52 +93,61 @@ const registerDashboardRoutes = (app, {
         months.push(monthStr);
       }
 
-      const [totalResult, perCourseResult, monthlyResult] = await Promise.all([
-        // Total earnings
-        courseEnrollmentsCollection.aggregate([
-          { $match: { instructorEmail: instructorEmailRegex } },
-          { $group: { _id: null, total: { $sum: "$instructorEarnings" } } },
-        ]).toArray(),
-
-        // Per-course earnings
-        courseEnrollmentsCollection.aggregate([
-          { $match: { instructorEmail: instructorEmailRegex } },
-          { $group: { _id: "$courseTitle", earnings: { $sum: "$instructorEarnings" } } },
-          { $sort: { earnings: -1 } },
-        ]).toArray(),
-
-        // Monthly earnings for last 6 complete months
-        courseEnrollmentsCollection.aggregate([
+      const enrollments = await courseEnrollmentsCollection
+        .find(
+          { instructorEmail: instructorEmailRegex },
           {
-            $match: {
-              instructorEmail: instructorEmailRegex,
-              createdAt: { $gte: new Date(now.getFullYear(), now.getMonth() - 6, 1).toISOString() },
+            projection: {
+              price: 1,
+              pricePoisha: 1,
+              commission: 1,
+              commissionPoisha: 1,
+              instructorEarnings: 1,
+              instructorEarningsPoisha: 1,
+              courseTitle: 1,
+              createdAt: 1,
             },
-          },
-          {
-            $group: {
-              _id: { $substr: ["$createdAt", 0, 7] },
-              earnings: { $sum: "$instructorEarnings" },
-            },
-          },
-          { $sort: { _id: 1 } },
-        ]).toArray(),
-      ]);
+          }
+        )
+        .toArray();
 
-      const monthlyMap = new Map(monthlyResult.map((m) => [m._id, m.earnings]));
+      let totalEarningsPoisha = 0;
+      const perCoursePoishaMap = new Map();
+      const monthlyPoishaMap = new Map();
+
+      for (const e of enrollments) {
+        const split = resolveEnrollmentPoisha(e);
+        totalEarningsPoisha += split.instructorEarningsPoisha;
+
+        const title = e.courseTitle || "Unknown Course";
+        perCoursePoishaMap.set(title, (perCoursePoishaMap.get(title) || 0) + split.instructorEarningsPoisha);
+
+        if (e.createdAt) {
+          const monthKey = e.createdAt.substring(0, 7);
+          if (months.includes(monthKey)) {
+            monthlyPoishaMap.set(monthKey, (monthlyPoishaMap.get(monthKey) || 0) + split.instructorEarningsPoisha);
+          }
+        }
+      }
+
+      const perCourse = Array.from(perCoursePoishaMap.entries())
+        .sort((a, b) => b[1] - a[1])
+        .map(([courseTitle, poisha]) => ({
+          courseTitle,
+          earnings: fromPoisha(poisha),
+        }));
 
       // Build monthly array with zero-fill for missing months
       const monthly = months.map((month) => ({
         month,
-        earnings: Number((monthlyMap.get(month) || 0).toFixed(2)),
+        earnings: fromPoisha(monthlyPoishaMap.get(month) || 0),
       }));
 
       return res.json({
-        totalEarnings: Number((totalResult[0]?.total || 0).toFixed(2)),
-        perCourse: perCourseResult.map((c) => ({
-          courseTitle: c._id || "Unknown Course",
-          earnings: Number(c.earnings.toFixed(2)),
-        })),
+        currency: CURRENCY_CODE,
+        totalEarningsPoisha,
+        totalEarnings: fromPoisha(totalEarningsPoisha),
+        perCourse,
         monthly,
       });
     } catch (err) {
@@ -165,9 +176,10 @@ const registerDashboardRoutes = (app, {
       }
 
       const now = new Date().toISOString();
+      const banReason = reason && reason.trim() ? reason.trim() : "Violation of terms";
       const historyItem = {
         action: "banned",
-        reason: reason ? reason.trim() : "Violation of terms",
+        reason: banReason,
         timestamp: now,
         by: req.user.email,
       };
@@ -175,10 +187,33 @@ const registerDashboardRoutes = (app, {
       await courseEnrollmentsCollection.updateOne(
         { _id: new ObjectId(enrollmentId) },
         {
-          $set: { banned: true, bannedAt: now, bannedByEmail: req.user.email, status: "banned" },
+          $set: { banned: true, bannedAt: now, bannedByEmail: req.user.email, banReason, status: "banned" },
           $push: { history: historyItem },
         }
       );
+
+      // Real-time notification to learner
+      if (userNotificationsCollection && enrollment.learnerEmail) {
+        const notif = {
+          recipientEmail: enrollment.learnerEmail.toLowerCase(),
+          type: "course_banned",
+          title: `Access Restricted: ${enrollment.courseTitle || "Course"}`,
+          message: `Your enrollment has been banned by instructor. Reason: ${banReason}. You may submit an appeal from your Classroom Dashboard.`,
+          courseId: enrollment.courseId.toString(),
+          enrollmentId,
+          isRead: false,
+          createdAt: now,
+        };
+        await userNotificationsCollection.insertOne(notif);
+        if (io) {
+          io.to(`user:${enrollment.learnerEmail.toLowerCase()}`).emit("user-notification:new", notif);
+          io.to(`user:${enrollment.learnerEmail.toLowerCase()}`).emit("enrollment:updated", {
+            courseId: enrollment.courseId.toString(),
+            status: "banned",
+            active: false,
+          });
+        }
+      }
 
       return res.json({ message: "Student banned.", enrollmentId });
     } catch (err) {
@@ -211,11 +246,34 @@ const registerDashboardRoutes = (app, {
       await courseEnrollmentsCollection.updateOne(
         { _id: new ObjectId(enrollmentId) },
         {
-          $set: { banned: false, status: "active" },
-          $unset: { bannedAt: "", bannedByEmail: "" },
+          $set: { banned: false, status: enrollment.suspended ? "suspended" : "active" },
+          $unset: { bannedAt: "", bannedByEmail: "", banReason: "" },
           $push: { history: historyItem },
         }
       );
+
+      // Real-time notification to learner
+      if (userNotificationsCollection && enrollment.learnerEmail) {
+        const notif = {
+          recipientEmail: enrollment.learnerEmail.toLowerCase(),
+          type: "course_access_restored",
+          title: `Access Restored: ${enrollment.courseTitle || "Course"}`,
+          message: `Your ban on ${enrollment.courseTitle || "the course"} has been lifted. You can access the classroom now.`,
+          courseId: enrollment.courseId.toString(),
+          enrollmentId,
+          isRead: false,
+          createdAt: now,
+        };
+        await userNotificationsCollection.insertOne(notif);
+        if (io) {
+          io.to(`user:${enrollment.learnerEmail.toLowerCase()}`).emit("user-notification:new", notif);
+          io.to(`user:${enrollment.learnerEmail.toLowerCase()}`).emit("enrollment:updated", {
+            courseId: enrollment.courseId.toString(),
+            status: enrollment.suspended ? "suspended" : "active",
+            active: !enrollment.suspended,
+          });
+        }
+      }
 
       return res.json({ message: "Student unbanned.", enrollmentId });
     } catch (err) {
@@ -236,22 +294,57 @@ const registerDashboardRoutes = (app, {
         return res.status(403).json({ message: "Access denied." });
       }
 
-      const now = new Date().toISOString();
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const durationDays = Number(days) || 7;
+      const untilIso = new Date(now.getTime() + durationDays * 86400000).toISOString();
+      const suspendReason = reason && reason.trim() ? reason.trim() : "Temporary suspension";
+
       const historyItem = {
         action: "suspended",
-        reason: reason ? reason.trim() : "Temporary suspension",
-        durationDays: days || 7,
-        timestamp: now,
+        reason: suspendReason,
+        durationDays,
+        timestamp: nowIso,
         by: req.user.email,
       };
 
       await courseEnrollmentsCollection.updateOne(
         { _id: new ObjectId(enrollmentId) },
         {
-          $set: { suspended: true, suspendedAt: now, status: "suspended" },
+          $set: {
+            suspended: true,
+            suspendedAt: nowIso,
+            suspendedDays: durationDays,
+            suspendedUntil: untilIso,
+            suspendReason,
+            status: "suspended",
+          },
           $push: { history: historyItem },
         }
       );
+
+      // Real-time notification to learner
+      if (userNotificationsCollection && enrollment.learnerEmail) {
+        const notif = {
+          recipientEmail: enrollment.learnerEmail.toLowerCase(),
+          type: "course_suspended",
+          title: `Temporary Suspension: ${enrollment.courseTitle || "Course"}`,
+          message: `Your access has been suspended for ${durationDays} days. Reason: ${suspendReason}. You may message the instructor to appeal.`,
+          courseId: enrollment.courseId.toString(),
+          enrollmentId,
+          isRead: false,
+          createdAt: nowIso,
+        };
+        await userNotificationsCollection.insertOne(notif);
+        if (io) {
+          io.to(`user:${enrollment.learnerEmail.toLowerCase()}`).emit("user-notification:new", notif);
+          io.to(`user:${enrollment.learnerEmail.toLowerCase()}`).emit("enrollment:updated", {
+            courseId: enrollment.courseId.toString(),
+            status: "suspended",
+            active: false,
+          });
+        }
+      }
 
       return res.json({ message: "Student access suspended.", enrollmentId });
     } catch (err) {
@@ -282,11 +375,34 @@ const registerDashboardRoutes = (app, {
       await courseEnrollmentsCollection.updateOne(
         { _id: new ObjectId(enrollmentId) },
         {
-          $set: { suspended: false, status: "active" },
-          $unset: { suspendedAt: "" },
+          $set: { suspended: false, status: enrollment.banned ? "banned" : "active" },
+          $unset: { suspendedAt: "", suspendReason: "", suspendedUntil: "", suspendedDays: "" },
           $push: { history: historyItem },
         }
       );
+
+      // Real-time notification to learner
+      if (userNotificationsCollection && enrollment.learnerEmail) {
+        const notif = {
+          recipientEmail: enrollment.learnerEmail.toLowerCase(),
+          type: "course_access_restored",
+          title: `Access Restored: ${enrollment.courseTitle || "Course"}`,
+          message: `Your suspension on ${enrollment.courseTitle || "the course"} has been lifted! You can resume watching lessons.`,
+          courseId: enrollment.courseId.toString(),
+          enrollmentId,
+          isRead: false,
+          createdAt: now,
+        };
+        await userNotificationsCollection.insertOne(notif);
+        if (io) {
+          io.to(`user:${enrollment.learnerEmail.toLowerCase()}`).emit("user-notification:new", notif);
+          io.to(`user:${enrollment.learnerEmail.toLowerCase()}`).emit("enrollment:updated", {
+            courseId: enrollment.courseId.toString(),
+            status: enrollment.banned ? "banned" : "active",
+            active: !enrollment.banned,
+          });
+        }
+      }
 
       return res.json({ message: "Student suspension lifted.", enrollmentId });
     } catch (err) {
