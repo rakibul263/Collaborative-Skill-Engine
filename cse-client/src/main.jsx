@@ -6,12 +6,17 @@ import { router } from "./router/router.jsx";
 import AOS from "aos";
 import "aos/dist/aos.css";
 import AuthProvider from "./context/AuthContext/AuthProvider.jsx";
+import { AppToaster } from "@/components/ui/toast-system";
+import { GlobalConfirmProvider } from "@/components/ui/confirm-dialog";
 
 AOS.init();
 createRoot(document.getElementById("root")).render(
   <StrictMode>
     <AuthProvider>
-      <RouterProvider router={router}></RouterProvider>
+      <GlobalConfirmProvider>
+        <AppToaster />
+        <RouterProvider router={router} />
+      </GlobalConfirmProvider>
     </AuthProvider>
-  </StrictMode>,
+  </StrictMode>
 );
