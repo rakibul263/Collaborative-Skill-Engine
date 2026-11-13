@@ -1,8 +1,19 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import axios from "axios";
+import { NavLink } from "react-router";
 import { motion } from "framer-motion";
-import { Search, BookOpen, Sparkles, Filter, SlidersHorizontal, ArrowUpDown } from "lucide-react";
+import {
+  Search,
+  BookOpen,
+  Sparkles,
+  PlusCircle,
+  Award,
+  RefreshCw,
+  LayoutDashboard,
+} from "lucide-react";
 import CourseGrid from "@/components/courses/CourseGrid";
+import apiClient from "@/lib/apiClient";
+import useAuth from "@/hooks/useAuth";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
@@ -17,21 +28,37 @@ const CATEGORIES = [
 ];
 
 const CoursesMarketplace = () => {
+  const { user } = useAuth();
   const [allCourses, setAllCourses] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All Topics");
   const [sortBy, setSortBy] = useState("newest"); // "newest" | "price-low" | "price-high"
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [canCreateCourse, setCanCreateCourse] = useState(false);
+  const [enrolledIds, setEnrolledIds] = useState(() => new Set());
 
-  const fetchCourses = useCallback(async () => {
+  // Fetch published courses with auto-retry on network/boot delay
+  const fetchCourses = useCallback(async (isRetry = false) => {
     setLoading(true);
     setError("");
     try {
-      const res = await axios.get(`${API}/courses/public`);
+      const res = await apiClient.get("/courses/public");
       setAllCourses(res.data || []);
-    } catch {
-      setError("Unable to load courses from marketplace. Please try again later.");
+    } catch (err) {
+      console.warn("apiClient fetch error, attempting direct axios fallback:", err?.message);
+      try {
+        const fallbackRes = await axios.get(`${API}/courses/public`);
+        setAllCourses(fallbackRes.data || []);
+      } catch (fallbackErr) {
+        console.error("Courses fallback fetch error:", fallbackErr?.message);
+        if (!isRetry) {
+          // Automatic single retry in case server was restarting
+          setTimeout(() => fetchCourses(true), 1500);
+          return;
+        }
+        setError("Unable to load courses from marketplace. Please try again later.");
+      }
     } finally {
       setLoading(false);
     }
@@ -40,6 +67,34 @@ const CoursesMarketplace = () => {
   useEffect(() => {
     fetchCourses();
   }, [fetchCourses]);
+
+  // Check course creation / instructor eligibility & enrolled courses
+  useEffect(() => {
+    if (!user?.email) {
+      Promise.resolve().then(() => {
+        setCanCreateCourse(false);
+        setEnrolledIds(new Set());
+      });
+      return;
+    }
+    apiClient
+      .get("/courses/eligibility")
+      .then((res) => {
+        setCanCreateCourse(Boolean(res.data?.canCreateCourse));
+      })
+      .catch(() => {
+        setCanCreateCourse(false);
+      });
+    apiClient
+      .get("/courses/my-enrollments")
+      .then((res) => {
+        const list = Array.isArray(res.data) ? res.data : [];
+        setEnrolledIds(new Set(list.map((c) => c._id)));
+      })
+      .catch(() => {
+        setEnrolledIds(new Set());
+      });
+  }, [user]);
 
   // Derived filtered & sorted courses
   const filteredCourses = useMemo(() => {
@@ -84,11 +139,10 @@ const CoursesMarketplace = () => {
   };
 
   return (
-    <div className="min-h-screen py-12 px-4 sm:px-6 lg:px-8 relative overflow-hidden bg-[#030712] text-slate-100 font-sans selection:bg-indigo-500/30">
+    <div className="min-h-screen py-12 px-4 sm:px-6 lg:px-8 relative overflow-hidden bg-transparent text-slate-100 font-sans selection:bg-indigo-500/30">
       {/* Background Ambient Spotlight Glows */}
       <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[800px] h-[500px] bg-gradient-to-tr from-indigo-600/15 via-purple-600/10 to-pink-500/10 blur-[130px] pointer-events-none" />
       <div className="absolute top-1/3 right-0 w-96 h-96 bg-blue-600/10 blur-[120px] pointer-events-none" />
-      <div className="absolute inset-0 bg-grid-pattern opacity-10 pointer-events-none" />
 
       <div className="max-w-7xl mx-auto relative z-10 pt-16">
         {/* Header Hero Section */}
@@ -114,9 +168,33 @@ const CoursesMarketplace = () => {
               Explore curated courses created by verified platform mentors.
               Learn real-world software development, AI, design, and cloud architecture.
             </p>
+
+            {/* Creator Permission CTA in Hero */}
+            {user && canCreateCourse && (
+              <div className="pt-2 flex flex-wrap items-center gap-3">
+                <NavLink
+                  to="/studio/courses"
+                  className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 via-indigo-500 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-xs shadow-lg shadow-indigo-600/30 hover:scale-105 active:scale-95 transition-all cursor-pointer"
+                >
+                  <PlusCircle size={15} />
+                  <span>Create Course</span>
+                  <span className="px-1.5 py-0.5 text-[9px] font-black rounded-full bg-white/20 uppercase tracking-wider">
+                    Eligible
+                  </span>
+                </NavLink>
+
+                <NavLink
+                  to="/studio/dashboard"
+                  className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-slate-900/90 border border-emerald-500/40 hover:border-emerald-500 text-emerald-400 hover:text-emerald-300 font-bold text-xs transition-all shadow-sm"
+                >
+                  <LayoutDashboard size={14} />
+                  <span>Creator Studio</span>
+                </NavLink>
+              </div>
+            )}
           </motion.div>
 
-          {/* Search & Sort Bar */}
+          {/* Search, Sort & Actions Bar */}
           <motion.div
             initial={{ opacity: 0, scale: 0.95 }}
             animate={{ opacity: 1, scale: 1 }}
@@ -179,25 +257,44 @@ const CoursesMarketplace = () => {
           })}
         </div>
 
-        {/* Available Metrics Bar */}
-        <div className="flex items-center justify-between px-4 py-3 bg-slate-900/60 border border-slate-800/80 rounded-2xl mb-8 backdrop-blur-xl">
+        {/* Available Metrics Bar with Creator Status */}
+        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 bg-slate-900/60 border border-slate-800/80 rounded-2xl mb-8 backdrop-blur-xl">
           <div className="flex items-center gap-2 text-xs font-bold text-slate-300">
             <BookOpen size={15} className="text-indigo-400" />
             <span>
               Showing {filteredCourses.length} of {allCourses.length} Available Courses
             </span>
           </div>
-          <span className="text-[11px] font-semibold text-slate-400 hidden sm:inline">
-            Verified Mentor Content
-          </span>
+
+          <div className="flex items-center gap-3">
+            {canCreateCourse ? (
+              <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 text-xs font-bold">
+                <Award size={13} className="text-emerald-400" />
+                <span>Course Creator Privileges Active</span>
+              </div>
+            ) : user ? (
+              <NavLink
+                to="/studio"
+                className="text-[11px] font-semibold text-indigo-400 hover:underline flex items-center gap-1"
+              >
+                <Sparkles size={12} className="text-amber-400" />
+                <span>Become a Course Creator</span>
+              </NavLink>
+            ) : (
+              <span className="text-[11px] font-semibold text-slate-400 hidden sm:inline">
+                Verified Mentor Content
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Grid Component */}
         <CourseGrid
           courses={filteredCourses}
+          enrolledIds={enrolledIds}
           loading={loading}
           error={error}
-          onRetry={fetchCourses}
+          onRetry={() => fetchCourses(false)}
           onResetFilters={handleResetFilters}
         />
       </div>

@@ -21,7 +21,7 @@ const SkeletonCard = () => (
   </div>
 );
 
-const CourseGrid = ({ courses, loading, error, onRetry, onResetFilters }) => {
+const CourseGrid = ({ courses, enrolledIds, loading, error, onRetry, onResetFilters }) => {
   if (loading) {
     return (
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -80,7 +80,11 @@ const CourseGrid = ({ courses, loading, error, onRetry, onResetFilters }) => {
   return (
     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
       {courses.map((course) => (
-        <CourseMarketplaceCard key={course._id} course={course} />
+        <CourseMarketplaceCard
+          key={course._id}
+          course={course}
+          isEnrolled={enrolledIds?.has?.(course._id)}
+        />
       ))}
     </div>
   );

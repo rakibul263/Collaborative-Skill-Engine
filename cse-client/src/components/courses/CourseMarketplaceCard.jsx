@@ -10,19 +10,20 @@ import {
   Sparkles,
   Award,
 } from "lucide-react";
+import { formatBDT, resolveCoursePrice } from "@/lib/money";
 
 const PLACEHOLDER = "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?q=80&w=800&auto=format&fit=crop";
 
-const CourseMarketplaceCard = ({ course }) => {
+  const CourseMarketplaceCard = ({ course, isEnrolled = false }) => {
   const navigate = useNavigate();
 
   const lessonsCount = Array.isArray(course.curriculum) ? course.curriculum.length : 0;
-  const price = Number(course.price || 0);
+  const price = resolveCoursePrice(course);
 
   return (
     <motion.div
       whileHover={{ y: -6 }}
-      onClick={() => navigate(`/courses/${course._id}`)}
+      onClick={() => navigate(isEnrolled ? `/learn/${course._id}` : `/courses/${course._id}`)}
       className="bg-slate-900/70 border border-slate-800/90 hover:border-indigo-500/50 rounded-2xl overflow-hidden backdrop-blur-2xl cursor-pointer group transition-all duration-300 flex flex-col justify-between shadow-xl hover:shadow-indigo-500/10"
     >
       <div>
@@ -44,12 +45,14 @@ const CourseMarketplaceCard = ({ course }) => {
             <span>{course.topic || "General"}</span>
           </div>
 
-          {/* Price Badge */}
+          {/* Price / Enrolled Badge */}
           <div className="absolute bottom-3 right-3 bg-slate-950/90 backdrop-blur-md px-3 py-1 rounded-lg border border-slate-800 text-xs font-extrabold text-white flex items-center gap-1 shadow-md">
-            {price === 0 ? (
+            {isEnrolled ? (
+              <span className="text-emerald-400">Enrolled ✓</span>
+            ) : price === 0 ? (
               <span className="text-emerald-400">Free</span>
             ) : (
-              <span className="text-white">৳{price.toFixed(0)}</span>
+              <span className="text-white">{formatBDT(price)}</span>
             )}
           </div>
         </div>
@@ -95,9 +98,15 @@ const CourseMarketplaceCard = ({ course }) => {
 
       {/* Card Footer CTA */}
       <div className="px-5 py-3.5 bg-slate-950/60 border-t border-slate-800/80 flex items-center justify-between text-xs font-bold text-slate-400 group-hover:text-white transition-colors">
-        <span className="text-[11px] font-semibold text-slate-400">Explore Curriculum</span>
-        <span className="text-indigo-400 group-hover:translate-x-1 transition-transform flex items-center gap-1">
-          View Course <ChevronRight size={13} />
+        <span className="text-[11px] font-semibold text-slate-400">
+          {isEnrolled ? "Classroom Unlocked" : "Explore Curriculum"}
+        </span>
+        <span
+          className={`group-hover:translate-x-1 transition-transform flex items-center gap-1 ${
+            isEnrolled ? "text-emerald-400" : "text-indigo-400"
+          }`}
+        >
+          {isEnrolled ? "Enter Classroom" : "View Course"} <ChevronRight size={13} />
         </span>
       </div>
     </motion.div>
