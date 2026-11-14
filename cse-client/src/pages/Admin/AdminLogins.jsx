@@ -594,39 +594,39 @@ const AdminLogins = () => {
         <div className="flex items-center gap-1.5 p-1 bg-[#070b16] rounded-xl border border-slate-800/90 self-start sm:self-auto">
           <button
             onClick={() => setViewMode("grouped")}
-            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-mono font-bold transition-all ${
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
               viewMode === "grouped"
-                ? "bg-gradient-to-r from-cyan-500/20 to-indigo-500/20 border border-cyan-500/40 text-cyan-300 shadow-sm"
+                ? "bg-slate-800 text-white font-semibold shadow-sm"
                 : "text-slate-400 hover:text-slate-200"
             }`}
           >
             <Layers size={13} />
             Grouped by IP Directory
-            <span className="ml-1 px-1.5 py-0.2 rounded-full text-[9px] bg-slate-800 text-slate-300">
+            <span className="ml-1 px-1.5 py-0.2 rounded-full text-[9px] bg-slate-900 border border-slate-700 text-slate-300">
               1 Row / IP
             </span>
           </button>
 
           <button
             onClick={() => setViewMode("stream")}
-            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-mono font-bold transition-all ${
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
               viewMode === "stream"
-                ? "bg-gradient-to-r from-cyan-500/20 to-indigo-500/20 border border-cyan-500/40 text-cyan-300 shadow-sm"
+                ? "bg-slate-800 text-white font-semibold shadow-sm"
                 : "text-slate-400 hover:text-slate-200"
             }`}
           >
             <Activity size={13} />
             Raw Event Stream
-            <span className="ml-1 px-1.5 py-0.2 rounded-full text-[9px] bg-slate-800 text-slate-300">
+            <span className="ml-1 px-1.5 py-0.2 rounded-full text-[9px] bg-slate-900 border border-slate-700 text-slate-300">
               {streamTotal}
             </span>
           </button>
 
           <button
             onClick={() => setViewMode("anomalies")}
-            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-mono font-bold transition-all ${
+            className={`flex items-center gap-2 px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors ${
               viewMode === "anomalies"
-                ? "bg-gradient-to-r from-rose-500/25 to-amber-500/25 border border-rose-500/50 text-rose-300 shadow-sm"
+                ? "bg-slate-800 text-white font-semibold shadow-sm"
                 : "text-slate-400 hover:text-slate-200"
             }`}
           >
@@ -1137,32 +1137,32 @@ const AdminLogins = () => {
       {viewMode === "anomalies" && (
         <div className="space-y-6">
           {/* Top Intelligence Banner with Simulation Triggers */}
-          <div className="bg-gradient-to-r from-rose-950/40 via-[#0b101f] to-amber-950/30 rounded-3xl border border-rose-500/30 p-6 sm:p-8 shadow-2xl space-y-6">
+          <div className="bg-[#0E1322] rounded-xl border border-slate-800/80 p-5 sm:p-6 shadow-sm space-y-5">
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
               <div className="space-y-1.5">
-                <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-500/15 border border-rose-500/30 text-rose-400 text-xs font-mono font-bold uppercase tracking-wider">
-                  <ShieldAlert size={14} className="text-rose-400" />
+                <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs font-medium">
+                  <ShieldAlert size={13} className="text-rose-400" />
                   <span>Automated Anomaly &amp; Sybil Ring Detection</span>
                 </div>
-                <h3 className="text-xl sm:text-2xl font-black text-white font-mono tracking-tight">
+                <h3 className="text-lg font-bold text-white tracking-tight">
                   Security Intelligence &amp; Fraud Telemetry
                 </h3>
-                <p className="text-xs text-slate-400 max-w-2xl leading-relaxed font-sans">
+                <p className="text-xs text-slate-400 max-w-2xl leading-relaxed">
                   Detects physically impossible geographic velocity jumps (e.g. Dhaka to London in minutes)
                   and multi-account Sybil review rings from identical IP addresses attempting to inflate course ratings.
                 </p>
               </div>
 
               {/* Simulation Demo Controls */}
-              <div className="flex flex-wrap items-center gap-2.5">
+              <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   onClick={handleSimulateTravel}
                   disabled={simulatingTravel}
-                  className="px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-red-700 hover:from-rose-500 hover:to-red-600 text-white text-xs font-mono font-bold shadow-lg shadow-rose-900/30 flex items-center gap-2 disabled:opacity-50 cursor-pointer transition-all"
+                  className="px-3.5 py-2 rounded-lg bg-rose-600/90 hover:bg-rose-600 text-white text-xs font-medium shadow-sm flex items-center gap-2 disabled:opacity-50 cursor-pointer transition-colors"
                   title="Simulate Dhaka -> London login jump"
                 >
-                  <Zap size={14} className={simulatingTravel ? "animate-spin" : "text-amber-300"} />
+                  <Zap size={13} className={simulatingTravel ? "animate-spin" : "text-rose-200"} />
                   <span>{simulatingTravel ? "Simulating..." : "Simulate Impossible Travel"}</span>
                 </button>
 
@@ -1170,10 +1170,10 @@ const AdminLogins = () => {
                   type="button"
                   onClick={handleSimulateReviewFraud}
                   disabled={simulatingReview}
-                  className="px-3.5 py-2.5 rounded-xl bg-gradient-to-r from-amber-600 to-yellow-700 hover:from-amber-500 hover:to-yellow-600 text-slate-950 text-xs font-mono font-black shadow-lg shadow-amber-900/30 flex items-center gap-2 disabled:opacity-50 cursor-pointer transition-all"
+                  className="px-3.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium border border-slate-700 flex items-center gap-2 disabled:opacity-50 cursor-pointer transition-colors"
                   title="Simulate multi-account 5-star review burst from same IP"
                 >
-                  <Star size={14} className={simulatingReview ? "animate-spin" : "fill-slate-950"} />
+                  <Star size={13} className={simulatingReview ? "animate-spin" : "fill-amber-400 text-amber-400"} />
                   <span>{simulatingReview ? "Simulating..." : "Simulate Review Fraud"}</span>
                 </button>
 
@@ -1181,7 +1181,7 @@ const AdminLogins = () => {
                   type="button"
                   onClick={fetchAnomalies}
                   disabled={anomalyLoading}
-                  className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white cursor-pointer transition-colors"
+                  className="p-2 rounded-lg bg-[#080B11] border border-slate-800 text-slate-400 hover:text-white cursor-pointer transition-colors"
                   title="Refresh security alerts"
                 >
                   <RefreshCw size={16} className={anomalyLoading ? "animate-spin text-cyan-400" : ""} />
@@ -1257,10 +1257,10 @@ const AdminLogins = () => {
                 return (
                   <div
                     key={alert._id}
-                    className={`rounded-3xl p-5 sm:p-7 border transition-all shadow-xl font-mono ${
+                    className={`rounded-xl p-5 sm:p-6 border transition-all shadow-sm ${
                       isTravel
-                        ? "bg-gradient-to-br from-rose-950/30 via-[#0b101f] to-[#070b16] border-rose-500/40"
-                        : "bg-gradient-to-br from-amber-950/25 via-[#0b101f] to-[#070b16] border-amber-500/40"
+                        ? "bg-[#0E1322] border-rose-500/30"
+                        : "bg-[#0E1322] border-amber-500/30"
                     }`}
                   >
                     {/* Alert Card Header */}

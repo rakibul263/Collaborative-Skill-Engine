@@ -12,12 +12,8 @@ import {
 import {
   DollarSign,
   TrendingUp,
-  CreditCard,
-  Calendar,
-  Filter,
   RefreshCw,
   Award,
-  BookOpen,
   AlertCircle,
 } from "lucide-react";
 import { LoadingSpinner, AdminPageLoader } from "@/components/shared/loading/LoadingSpinner";
@@ -35,13 +31,13 @@ const formatMoney = (val) => {
 const CustomTooltip = ({ active, payload, label }) => {
   if (active && payload && payload.length) {
     return (
-      <div className="bg-[#0b101f] border border-slate-700/80 rounded-xl p-3 shadow-xl text-xs font-mono">
-        <p className="text-slate-300 font-bold mb-1.5">{label}</p>
+      <div className="bg-[#0E1322] border border-slate-800 rounded-xl p-3 shadow-xl text-xs">
+        <p className="text-slate-300 font-semibold mb-1.5">{label}</p>
         {payload.map((entry, index) => (
           <p key={`item-${index}`} className="flex items-center gap-2" style={{ color: entry.color }}>
             <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color }} />
-            <span className="capitalize">{entry.name}:</span>
-            <span className="font-bold">৳{formatMoney(entry.value)}</span>
+            <span className="capitalize text-slate-400">{entry.name}:</span>
+            <span className="font-mono font-semibold">৳{formatMoney(entry.value)}</span>
           </p>
         ))}
       </div>
@@ -114,12 +110,12 @@ const AdminRevenue = () => {
 
   if (error && !revenueData) {
     return (
-      <div className="bg-[#160c14] border border-rose-900/50 rounded-2xl p-8 text-center max-w-lg mx-auto my-12">
+      <div className="bg-[#0E1322] border border-rose-900/40 rounded-2xl p-8 text-center max-w-lg mx-auto my-12">
         <AlertCircle className="mx-auto text-rose-400 mb-3" size={32} />
-        <p className="text-rose-300 font-bold text-sm mb-4">{error}</p>
+        <p className="text-rose-300 font-semibold text-sm mb-4">{error}</p>
         <button
           onClick={() => fetchRevenue(rangePreset, startDate, endDate)}
-          className="px-5 py-2 bg-rose-600 hover:bg-rose-500 text-white rounded-xl font-bold text-xs transition-all shadow-md"
+          className="px-5 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg font-medium text-xs transition-colors"
         >
           Retry Connection
         </button>
@@ -128,21 +124,22 @@ const AdminRevenue = () => {
   }
 
   return (
-    <div className="space-y-8 max-w-7xl mx-auto pb-12">
+    <div className="space-y-6 max-w-7xl mx-auto pb-12 font-sans">
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-black text-white tracking-tight flex items-center gap-2">
+          <h1 className="text-xl font-bold text-slate-100 tracking-tight flex items-center gap-2">
+            <DollarSign className="text-slate-400 w-5 h-5" />
             Revenue Ledger & Commission Analytics
           </h1>
-          <p className="text-xs font-mono text-slate-400 mt-1">
-            Track gross marketplace transactions, 15% platform split, and 85% instructor earnings
+          <p className="text-xs text-slate-400 mt-1">
+            Track gross marketplace volume, 15% platform split, and 85% instructor earnings
           </p>
         </div>
 
         <button
           onClick={() => fetchRevenue(rangePreset, startDate, endDate)}
-          className="flex items-center gap-2 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 rounded-xl font-mono text-xs font-bold transition-all self-start"
+          className="flex items-center gap-2 px-3.5 py-2 bg-[#0E1322] hover:bg-slate-800 text-slate-300 border border-slate-800 rounded-lg text-xs font-medium transition-colors self-start"
         >
           <RefreshCw size={14} className={loading ? "animate-spin" : ""} />
           Sync Financials
@@ -152,62 +149,62 @@ const AdminRevenue = () => {
       {/* Top Financial Stat Highlights */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {/* Gross Sales */}
-        <div className="bg-[#0b101f]/90 border border-slate-800/80 rounded-2xl p-6 shadow-xl relative overflow-hidden group">
+        <div className="bg-[#0E1322] border border-slate-800/80 rounded-xl p-5 shadow-sm">
           <div className="flex items-center justify-between mb-3">
-            <span className="text-[10px] font-mono uppercase tracking-widest text-slate-400 font-bold">
-              Gross Marketplace Volume
+            <span className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">
+              Gross Volume
             </span>
-            <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 text-indigo-400 flex items-center justify-center">
-              <TrendingUp size={20} />
+            <div className="w-8 h-8 rounded-lg bg-slate-800 text-slate-300 flex items-center justify-center">
+              <TrendingUp size={16} />
             </div>
           </div>
-          <p className="text-3xl font-black text-white font-mono">
+          <p className="text-2xl font-bold text-white font-mono">
             ৳{formatMoney(revenueData?.totalGross ?? revenueData?.grossSales)}
           </p>
-          <p className="text-xs font-mono text-indigo-400 mt-1">
+          <p className="text-xs text-slate-400 mt-1">
             Total learner transactions processed
           </p>
         </div>
 
         {/* Platform Commission (15%) */}
-        <div className="bg-[#0b101f]/90 border border-cyan-500/30 rounded-2xl p-6 shadow-xl relative overflow-hidden group bg-gradient-to-br from-cyan-950/20 to-transparent">
+        <div className="bg-[#0E1322] border border-slate-800/80 rounded-xl p-5 shadow-sm">
           <div className="flex items-center justify-between mb-3">
-            <span className="text-[10px] font-mono uppercase tracking-widest text-cyan-400 font-bold">
+            <span className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">
               Platform Commission (15%)
             </span>
-            <div className="w-10 h-10 rounded-xl bg-cyan-500/10 border border-cyan-500/30 text-cyan-300 flex items-center justify-center">
-              <DollarSign size={20} />
+            <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-400 flex items-center justify-center">
+              <DollarSign size={16} />
             </div>
           </div>
-          <p className="text-3xl font-black text-cyan-300 font-mono">
+          <p className="text-2xl font-bold text-emerald-400 font-mono">
             ৳{formatMoney(revenueData?.totalCommission ?? revenueData?.totalRevenue)}
           </p>
-          <p className="text-xs font-mono text-cyan-400/80 mt-1">
+          <p className="text-xs text-slate-400 mt-1">
             Net platform maintenance & hosting margin
           </p>
         </div>
 
         {/* Instructor Payouts (85%) */}
-        <div className="bg-[#0b101f]/90 border border-slate-800/80 rounded-2xl p-6 shadow-xl relative overflow-hidden group">
+        <div className="bg-[#0E1322] border border-slate-800/80 rounded-xl p-5 shadow-sm">
           <div className="flex items-center justify-between mb-3">
-            <span className="text-[10px] font-mono uppercase tracking-widest text-emerald-400 font-bold">
+            <span className="text-[11px] uppercase tracking-wider text-slate-400 font-medium">
               Instructor Disbursals (85%)
             </span>
-            <div className="w-10 h-10 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 flex items-center justify-center">
-              <Award size={20} />
+            <div className="w-8 h-8 rounded-lg bg-indigo-500/10 text-indigo-400 flex items-center justify-center">
+              <Award size={16} />
             </div>
           </div>
-          <p className="text-3xl font-black text-emerald-400 font-mono">
+          <p className="text-2xl font-bold text-slate-100 font-mono">
             ৳{formatMoney(revenueData?.totalInstructorEarnings ?? revenueData?.instructorPayouts)}
           </p>
-          <p className="text-xs font-mono text-emerald-400/80 mt-1">
+          <p className="text-xs text-slate-400 mt-1">
             Total instructor earnings distributed
           </p>
         </div>
       </div>
 
       {/* Date Filter Bar */}
-      <div className="p-4 bg-[#0b101f]/90 border border-slate-800/80 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-4">
+      <div className="p-3.5 bg-[#0E1322] border border-slate-800/80 rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-3">
         {/* Quick presets */}
         <div className="flex items-center gap-1.5 overflow-x-auto">
           {[
@@ -223,10 +220,10 @@ const AdminRevenue = () => {
                 setEndDate("");
                 setRangePreset(preset.id);
               }}
-              className={`px-3 py-1.5 rounded-xl text-xs font-mono font-bold transition-all ${
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
                 rangePreset === preset.id
-                  ? "bg-cyan-500/20 border border-cyan-500/40 text-cyan-300"
-                  : "bg-slate-900 border border-slate-800 text-slate-400 hover:text-white"
+                  ? "bg-slate-800 text-white font-semibold"
+                  : "text-slate-400 hover:text-slate-200"
               }`}
             >
               {preset.label}
@@ -235,30 +232,30 @@ const AdminRevenue = () => {
         </div>
 
         {/* Custom Range Picker */}
-        <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
+        <div className="flex flex-wrap items-center gap-2 text-xs">
           <input
             type="date"
             value={startDate}
             onChange={(e) => setStartDate(e.target.value)}
-            className="px-3 py-1.5 bg-[#070b16] border border-slate-800 rounded-xl text-slate-300 focus:outline-none focus:border-cyan-500"
+            className="px-3 py-1.5 bg-[#080B11] border border-slate-800 rounded-lg text-slate-300 focus:outline-none focus:border-slate-600 font-mono transition-colors"
           />
-          <span className="text-slate-400">to</span>
+          <span className="text-slate-500">to</span>
           <input
             type="date"
             value={endDate}
             onChange={(e) => setEndDate(e.target.value)}
-            className="px-3 py-1.5 bg-[#070b16] border border-slate-800 rounded-xl text-slate-300 focus:outline-none focus:border-cyan-500"
+            className="px-3 py-1.5 bg-[#080B11] border border-slate-800 rounded-lg text-slate-300 focus:outline-none focus:border-slate-600 font-mono transition-colors"
           />
           <button
             onClick={handleApplyCustomDates}
-            className="px-3.5 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded-xl font-bold transition-all"
+            className="px-3.5 py-1.5 bg-slate-100 hover:bg-white text-slate-900 rounded-lg font-semibold transition-colors shadow-sm"
           >
-            Filter
+            Apply
           </button>
           {(startDate || endDate) && (
             <button
               onClick={handleClearFilter}
-              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl transition-all"
+              className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors"
             >
               Reset
             </button>
@@ -267,14 +264,14 @@ const AdminRevenue = () => {
       </div>
 
       {/* Chart Section */}
-      <div className="bg-[#0b101f]/90 rounded-2xl p-6 border border-slate-800/80 shadow-xl">
-        <div className="flex items-center justify-between mb-6">
+      <div className="bg-[#0E1322] rounded-xl p-5 border border-slate-800/80 shadow-sm">
+        <div className="flex items-center justify-between mb-5">
           <div>
-            <h3 className="text-xs font-mono uppercase tracking-widest text-cyan-400 font-bold">
+            <h3 className="text-xs uppercase tracking-wider text-slate-300 font-semibold">
               Monthly Revenue Performance
             </h3>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Comparison of Gross Marketplace Sales vs Platform 15% Margin
+            <p className="text-xs text-slate-500 mt-0.5">
+              Gross Marketplace Volume vs Platform 15% Margin
             </p>
           </div>
         </div>
@@ -284,18 +281,18 @@ const AdminRevenue = () => {
             <AreaChart data={chartData}>
               <defs>
                 <linearGradient id="grossGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#6366f1" stopOpacity={0.35} />
+                  <stop offset="5%" stopColor="#6366f1" stopOpacity={0.25} />
                   <stop offset="95%" stopColor="#6366f1" stopOpacity={0.0} />
                 </linearGradient>
                 <linearGradient id="commGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#06b6d4" stopOpacity={0.4} />
-                  <stop offset="95%" stopColor="#06b6d4" stopOpacity={0.0} />
+                  <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#10b981" stopOpacity={0.0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-              <XAxis dataKey="month" stroke="#64748b" tick={{ fontSize: 11, fill: "#94a3b8" }} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#1E293B" vertical={false} />
+              <XAxis dataKey="month" stroke="#475569" tick={{ fontSize: 11, fill: "#94a3b8" }} />
               <YAxis
-                stroke="#64748b"
+                stroke="#475569"
                 allowDecimals={false}
                 tick={{ fontSize: 11, fill: "#94a3b8" }}
                 tickFormatter={(v) => formatBDT(v)}
@@ -317,7 +314,7 @@ const AdminRevenue = () => {
               <Area
                 type="monotone"
                 dataKey="commission"
-                stroke="#06b6d4"
+                stroke="#10b981"
                 strokeWidth={2}
                 fillOpacity={1}
                 fill="url(#commGrad)"
@@ -329,13 +326,13 @@ const AdminRevenue = () => {
       </div>
 
       {/* Per Course Breakdown Table */}
-      <div className="bg-[#0b101f]/90 rounded-2xl border border-slate-800/80 shadow-xl overflow-hidden">
-        <div className="px-6 py-4 border-b border-slate-800/80 bg-[#070b16]/70 flex items-center justify-between">
-          <h3 className="text-xs font-mono uppercase tracking-widest text-slate-200 font-bold">
+      <div className="bg-[#0E1322] rounded-xl border border-slate-800/80 shadow-sm overflow-hidden">
+        <div className="px-6 py-3.5 border-b border-slate-800/80 bg-[#0A0E1A] flex items-center justify-between">
+          <h3 className="text-xs uppercase tracking-wider text-slate-300 font-semibold">
             Curriculum Sales Breakdown
           </h3>
-          <span className="text-xs font-mono text-cyan-400">
-            {(revenueData?.courses || []).length} Curriculums with Sales
+          <span className="text-xs text-slate-400 font-mono">
+            {(revenueData?.courses || []).length} Curriculums
           </span>
         </div>
 
@@ -344,47 +341,47 @@ const AdminRevenue = () => {
             <LoadingSpinner size="md" label="Auditing ledger transactions..." />
           </div>
         ) : (revenueData?.courses || []).length === 0 ? (
-          <div className="py-16 text-center text-slate-400 font-mono text-xs">
+          <div className="py-16 text-center text-slate-500 text-xs">
             No sales transactions recorded in this timeframe
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
-                <tr className="border-b border-slate-800/80 bg-[#070b16]/50">
-                  <th className="px-4 py-3 text-left text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">
+                <tr className="border-b border-slate-800/80 bg-[#080B11]">
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                     Course Title
                   </th>
-                  <th className="px-4 py-3 text-left text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                     Instructor
                   </th>
-                  <th className="px-4 py-3 text-left text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                     Enrollments
                   </th>
-                  <th className="px-4 py-3 text-left text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                     Gross Sales
                   </th>
-                  <th className="px-4 py-3 text-left text-[10px] font-mono font-bold text-slate-400 uppercase tracking-widest">
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
                     Instructor (85%)
                   </th>
-                  <th className="px-4 py-3 text-left text-[10px] font-mono font-bold text-cyan-400 uppercase tracking-widest">
+                  <th className="px-4 py-3 text-left text-[11px] font-semibold text-emerald-400 uppercase tracking-wider">
                     Platform (15%)
                   </th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-800/60 font-mono text-xs">
+              <tbody className="divide-y divide-slate-800/60 text-xs">
                 {revenueData.courses.map((c, idx) => (
-                  <tr key={c.courseId || idx} className="hover:bg-slate-800/30 transition-colors">
-                    <td className="px-4 py-3.5 font-bold text-slate-200">{c.courseTitle || "Untitled Course"}</td>
-                    <td className="px-4 py-3.5 text-slate-400">{c.instructorName || c.instructorEmail || "Unknown"}</td>
-                    <td className="px-4 py-3.5 text-slate-300 font-bold">{c.enrollments || 0}</td>
-                    <td className="px-4 py-3.5 text-slate-200 font-bold">
+                  <tr key={c.courseId || idx} className="hover:bg-slate-800/20 transition-colors">
+                    <td className="px-4 py-3 font-medium text-slate-200">{c.courseTitle || "Untitled Course"}</td>
+                    <td className="px-4 py-3 text-slate-400">{c.instructorName || c.instructorEmail || "Unknown"}</td>
+                    <td className="px-4 py-3 text-slate-300 font-mono font-medium">{c.enrollments || 0}</td>
+                    <td className="px-4 py-3 text-slate-200 font-mono font-semibold">
                       ৳{formatMoney(c.grossSales)}
                     </td>
-                    <td className="px-4 py-3.5 text-emerald-400 font-bold">
+                    <td className="px-4 py-3 text-slate-300 font-mono">
                       ৳{formatMoney(c.instructorPayout ?? c.instructorEarnings)}
                     </td>
-                    <td className="px-4 py-3.5 text-cyan-300 font-bold">
+                    <td className="px-4 py-3 text-emerald-400 font-mono font-semibold">
                       ৳{formatMoney(c.commission)}
                     </td>
                   </tr>
