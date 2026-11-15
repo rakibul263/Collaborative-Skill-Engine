@@ -1,6 +1,7 @@
 const { ObjectId } = require("mongodb");
 const Stripe = require("stripe");
 const { verifyJWT } = require("../middleware/verifyJWT");
+const { paymentLimiter } = require("../middleware/rateLimiter");
 const {
   CURRENCY_CODE,
   fromPoisha,
@@ -88,6 +89,12 @@ const registerPaymentRoutes = (app, {
     const result = await courseEnrollmentsCollection.insertOne(enrollmentDoc);
     const inserted = { ...enrollmentDoc, _id: result.insertedId };
 
+    // Update course total enrollment counter
+    await coursesCollection.updateOne(
+      { _id: new ObjectId(courseId) },
+      { $inc: { enrollmentCount: 1 } }
+    ).catch(() => {});
+
     // Send notifications to student & instructor
     try {
       if (userNotificationsCollection) {
@@ -149,8 +156,8 @@ const registerPaymentRoutes = (app, {
     });
   });
 
-  // 2. POST /payments/create-checkout-session (requires login)
-  app.post("/payments/create-checkout-session", verifyJWT, async (req, res) => {
+  // 2. POST /payments/create-checkout-session (requires login & rate-limited)
+  app.post("/payments/create-checkout-session", verifyJWT, paymentLimiter, async (req, res) => {
     try {
       const { courseId } = req.body;
       if (!courseId || !ObjectId.isValid(courseId)) {
@@ -333,7 +340,8 @@ const registerPaymentRoutes = (app, {
 
     try {
       if (webhookSecret && sig) {
-        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+        const payload = req.rawBody || req.body;
+        event = stripe.webhooks.constructEvent(payload, sig, webhookSecret);
       } else {
         // Fallback for dev / test mode if webhook secret not set
         event = typeof req.body === "string" ? JSON.parse(req.body) : req.body;

@@ -3,6 +3,7 @@ const { getFirebaseAdmin } = require("../config/firebaseAdmin");
 const { findUserByEmail, normalizeEmail } = require("../utils/userLookup");
 const { parseClientIp, parseUserAgent } = require("../utils/deviceParser");
 const { resolveGeoLocation, detectImpossibleTravel } = require("../utils/geoSecurity");
+const { authLimiter } = require("../middleware/rateLimiter");
 
 const registerAuthRoutes = (app, {
   usersCollection,
@@ -20,7 +21,7 @@ const registerAuthRoutes = (app, {
     });
   });
 
-  app.post("/auth/token", async (req, res) => {
+  app.post("/auth/token", authLimiter, async (req, res) => {
     const clientIp = parseClientIp(req);
     const deviceInfo = parseUserAgent(req.headers["user-agent"] || "");
 
