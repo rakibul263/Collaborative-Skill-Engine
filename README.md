@@ -921,7 +921,7 @@ Pages ──► Components ──► lib/apiClient.js ──► Express API
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/collaborative-skill-engine.git
+git clone https://github.com/itzshuvo/collaborative-skill-engine.git
 cd collaborative-skill-engine
 
 # Install server dependencies
@@ -968,20 +968,76 @@ VITE_CLOUDINARY_CLOUD_NAME=your_cloudinary_cloud_name
 
 ### Run with Docker (Recommended)
 
-Run both client and server with a single command:
+The entire stack — React SPA behind Nginx plus the Express API — runs with a
+single command. Both images are built from source, so you do **not** need Node
+installed on the host.
+
+#### Prerequisites
+
+| Requirement | Why |
+| --- | --- |
+| Docker ≥ 24 & Docker Compose ≥ v2.24 | Builds both images and reads the optional `env_file` syntax |
+| `cse-server/.env` | MongoDB, JWT, Groq/Gemini and Cloudinary credentials |
+| `cse-client/.env` | Vite build-time config (Firebase public keys, API URL) |
+| `cse-server/firebase-service-account.json` | Firebase Admin auth (optional — the server starts without it and warns) |
+
+#### 1. Configure environment
 
 ```bash
-# Build and start all services in background
-docker compose up -d --build
-
-# View logs
-docker compose logs -f
-
-# Stop containers
-docker compose down
+cp cse-server/.env.example cse-server/.env
+cp cse-client/.env.example cse-client/.env
+# then edit both files with your real credentials
 ```
 
-The client will be running at `http://localhost:5173` and the server at `http://localhost:3000`.
+#### 2. Build and start
+
+```bash
+docker compose up -d --build
+```
+
+#### 3. Verify
+
+```bash
+docker compose ps            # both services should be (healthy)
+curl http://localhost:3000/health
+open http://localhost:5173
+```
+
+#### 4. Everyday commands
+
+```bash
+docker compose logs -f            # tail both services
+docker compose logs -f server     # tail one service
+docker compose up -d              # start after a stop
+docker compose build --no-cache   # clean rebuild
+docker compose down               # stop and remove containers
+docker compose down -v            # stop and drop named volumes
+```
+
+| Service | URL | Container |
+| --- | --- | --- |
+| Client (Nginx + React) | http://localhost:5173 | `cse-client` |
+| Server (Express API) | http://localhost:3000 | `cse-server` |
+| Health probe | http://localhost:3000/health | — |
+
+#### Troubleshooting
+
+```bash
+# Container keeps restarting -> almost always a missing .env value
+docker compose logs server | tail -30
+
+# Ports already in use (e.g. a previous stack still running)
+docker ps --format '{{.Names}}\t{{.Ports}}'
+docker rm -f cse-server cse-client
+docker compose up -d
+
+# Stale build cache
+docker compose build --no-cache
+```
+
+> **Ports:** the client intentionally publishes on `5173` (matching the Vite dev
+> port) while Nginx listens on `80` inside the container. Change both sides of
+> `ports:` in `docker-compose.yml` if you need a different host port.
 
 ### Run in Development (Manual)
 
