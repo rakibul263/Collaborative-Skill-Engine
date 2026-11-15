@@ -247,6 +247,11 @@ const createAiAdvisorController = (deps) => {
         }
       }
 
+      let isAborted = false;
+      req.on("close", () => {
+        isAborted = true;
+      });
+
       // Stream the response token-by-token
       const responsePayload = await streamAdvisorResponse({
         userProfile,
@@ -255,9 +260,16 @@ const createAiAdvisorController = (deps) => {
         memoryContext,
         mentorSuggestions,
         onToken: (token) => {
-          res.write(`data: ${JSON.stringify({ type: "token", text: token })}\n\n`);
+          if (isAborted || res.writableEnded) return;
+          try {
+            res.write(`data: ${JSON.stringify({ type: "token", text: token })}\n\n`);
+          } catch {
+            isAborted = true;
+          }
         },
       });
+
+      if (isAborted || res.writableEnded) return;
 
       responsePayload.courseSuggestions = courseSuggestions;
 
@@ -318,6 +330,11 @@ const createAiAdvisorController = (deps) => {
       res.setHeader("Connection", "keep-alive");
       res.flushHeaders?.();
 
+      let isAborted = false;
+      req.on("close", () => {
+        isAborted = true;
+      });
+
       const result = await streamInterviewTurn({
         userProfile,
         role,
@@ -326,9 +343,16 @@ const createAiAdvisorController = (deps) => {
         interviewHistory,
         candidateAnswer: (candidateAnswer || "").trim(),
         onToken: (token) => {
-          res.write(`data: ${JSON.stringify({ type: "token", text: token })}\n\n`);
+          if (isAborted || res.writableEnded) return;
+          try {
+            res.write(`data: ${JSON.stringify({ type: "token", text: token })}\n\n`);
+          } catch {
+            isAborted = true;
+          }
         },
       });
+
+      if (isAborted || res.writableEnded) return;
 
       let scorecardId = null;
       if (action === "conclude" && aiAdvisorSessionsCollection) {
