@@ -20,12 +20,17 @@ const upload = multer({
       "binary/octet-stream",
     ];
 
-    if (hasAllowedExt || allowedMime.includes(file.mimetype)) {
+    if (!hasAllowedExt) {
+      cb(new Error("Only PDF, DOCX, and TXT files are allowed."));
+      return;
+    }
+
+    if (allowedMime.includes(file.mimetype)) {
       cb(null, true);
       return;
     }
 
-    cb(new Error("Only PDF, DOCX, and TXT files are allowed."));
+    cb(new Error("Invalid file MIME type. Only PDF, DOCX, and TXT files are allowed."));
   },
 });
 

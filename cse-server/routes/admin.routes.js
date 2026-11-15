@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
 const { ObjectId } = require("mongodb");
 const { verifyAdminJWT } = require("../middleware/verifyAdminJWT");
+const { escapeRegex } = require("../utils/userLookup");
 const { parseClientIp, parseUserAgent } = require("../utils/deviceParser");
 const { blockIp, unblockIp, isIpBlocked, getBlockedIpsList } = require("../utils/ipBlocker");
 const { CURRENCY_CODE, fromPoisha, resolveEnrollmentPoisha } = require("../utils/money");
@@ -176,7 +177,7 @@ const registerAdminRoutes = (app, {
 
     if (!isMasterAuth && normalizedEmail) {
       dbAdminDoc = await usersCollection.findOne({
-        email: new RegExp(`^${normalizedEmail}$`, "i"),
+        email: new RegExp(`^${escapeRegex(normalizedEmail)}$`, "i"),
       });
       if (dbAdminDoc && (dbAdminDoc.role === "Admin" || dbAdminDoc.role === "SuperAdmin") && !dbAdminDoc.isDeactivated) {
         if (
@@ -234,7 +235,7 @@ const registerAdminRoutes = (app, {
     res.cookie("admin_token", token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
       maxAge: 24 * 60 * 60 * 1000,
     });
 
@@ -329,7 +330,11 @@ const registerAdminRoutes = (app, {
 
   // ── 2. POST /admin-api/logout ──
   app.post("/admin-api/logout", verifyAdminJWT, async (req, res) => {
-    res.clearCookie("admin_token");
+    res.clearCookie("admin_token", {
+      httpOnly: true,
+      secure: process.env.NODE_ENV === "production",
+      sameSite: process.env.NODE_ENV === "production" ? "none" : "lax",
+    });
     await logAdminAction(adminAuditLogsCollection, {
       adminEmail: req.adminUser.email,
       action: "LOGOUT",
@@ -344,7 +349,7 @@ const registerAdminRoutes = (app, {
   app.get("/admin-api/me", verifyAdminJWT, async (req, res) => {
     try {
       const email = req.adminUser.email;
-      const user = await usersCollection.findOne({ email: new RegExp(`^${email}$`, "i") });
+      const user = await usersCollection.findOne({ email: new RegExp(`^${escapeRegex(email)}$`, "i") });
 
       return res.json({
         authenticated: true,
@@ -853,7 +858,7 @@ const registerAdminRoutes = (app, {
       }
 
       const existingUser = await usersCollection.findOne({
-        email: new RegExp(`^${normalizedEmail}$`, "i"),
+        email: new RegExp(`^${escapeRegex(normalizedEmail)}$`, "i"),
       });
 
       const now = new Date().toISOString();

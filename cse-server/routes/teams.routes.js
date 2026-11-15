@@ -1,5 +1,6 @@
 const { ObjectId } = require("mongodb");
 const { verifyJWT } = require("../middleware/verifyJWT");
+const { escapeRegex } = require("../utils/userLookup");
 const {
   runGeneticSquadFormation,
   ROLE_DEFINITIONS,
@@ -425,7 +426,7 @@ const registerTeamsRoutes = (
         if (userNotificationsCollection) {
           await userNotificationsCollection.updateMany(
             {
-              recipientEmail: new RegExp(`^${userEmail}$`, "i"),
+              recipientEmail: new RegExp(`^${escapeRegex(userEmail)}$`, "i"),
               teamId: teamId.toString(),
               type: "team_invite",
             },
@@ -505,7 +506,7 @@ const registerTeamsRoutes = (
         if (userNotificationsCollection) {
           await userNotificationsCollection.updateMany(
             {
-              recipientEmail: new RegExp(`^${userEmail}$`, "i"),
+              recipientEmail: new RegExp(`^${escapeRegex(userEmail)}$`, "i"),
               teamId: teamId.toString(),
               type: "team_invite",
             },

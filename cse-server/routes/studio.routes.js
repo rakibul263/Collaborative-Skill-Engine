@@ -1,5 +1,6 @@
 const { ObjectId } = require("mongodb");
 const { verifyJWT } = require("../middleware/verifyJWT");
+const { escapeRegex } = require("../utils/userLookup");
 const { calculateProfileCompletion, MIN_COURSE_CREATION_COMPLETION } = require("../utils/profileCompletion");
 const {
   CURRENCY_CODE,
@@ -31,7 +32,8 @@ const registerStudioRoutes = (app, {
 
   // Helper: compute dynamic backend eligibility criteria using unified profile completion
   const evaluateStudioEligibility = async (email) => {
-    const userDoc = await usersCollection.findOne({ email: new RegExp(`^${email}$`, "i") });
+    const escaped = escapeRegex(email);
+    const userDoc = await usersCollection.findOne({ email: new RegExp(`^${escaped}$`, "i") });
     if (!userDoc) {
       throw new Error("User not found");
     }
@@ -42,20 +44,20 @@ const registerStudioRoutes = (app, {
     // 2. Fetch ratings, expired schedules, and existing course topics
     const [ratingsResult, expiredSessions, existingCourses] = await Promise.all([
       ratingsCollection.aggregate([
-        { $match: { targetEmail: new RegExp(`^${email}$`, "i") } },
+        { $match: { targetEmail: new RegExp(`^${escaped}$`, "i") } },
         { $group: { _id: null, avg: { $avg: "$rating" }, totalCount: { $sum: 1 } } },
       ]).toArray(),
 
       schedulesCollection.find({
         $or: [
-          { schedulerEmail: new RegExp(`^${email}$`, "i") },
-          { inviteeEmail: new RegExp(`^${email}$`, "i") },
+          { schedulerEmail: new RegExp(`^${escaped}$`, "i") },
+          { inviteeEmail: new RegExp(`^${escaped}$`, "i") },
         ],
         status: { $in: ["expired", "accepted", "completed"] },
       }).toArray(),
 
       coursesCollection.find(
-        { instructorEmail: new RegExp(`^${email}$`, "i") },
+        { instructorEmail: new RegExp(`^${escaped}$`, "i") },
         { projection: { topic: 1 } }
       ).toArray(),
     ]);
@@ -170,7 +172,7 @@ const registerStudioRoutes = (app, {
   app.get("/studio/signature", verifyJWT, async (req, res) => {
     try {
       const userDoc = await usersCollection.findOne(
-        { email: new RegExp(`^${req.user.email}$`, "i") },
+        { email: new RegExp(`^${escapeRegex(req.user.email)}$`, "i") },
         { projection: { instructorSignature: 1, signatureUpdatedAt: 1, fullName: 1, displayName: 1 } }
       );
       return res.json({
@@ -200,14 +202,14 @@ const registerStudioRoutes = (app, {
 
       const now = new Date().toISOString();
       await usersCollection.updateOne(
-        { email: new RegExp(`^${req.user.email}$`, "i") },
+        { email: new RegExp(`^${escapeRegex(req.user.email)}$`, "i") },
         { $set: { instructorSignature: signatureData, signatureUpdatedAt: now } }
       );
 
       // Sync across all course certificates issued for courses taught by this instructor
       if (courseCertificatesCollection) {
         await courseCertificatesCollection.updateMany(
-          { instructorEmail: new RegExp(`^${req.user.email}$`, "i") },
+          { instructorEmail: new RegExp(`^${escapeRegex(req.user.email)}$`, "i") },
           { $set: { instructorSignature: signatureData } }
         );
       }
@@ -243,7 +245,7 @@ const registerStudioRoutes = (app, {
 
       const now = new Date().toISOString();
       await usersCollection.updateOne(
-        { email: new RegExp(`^${req.user.email}$`, "i") },
+        { email: new RegExp(`^${escapeRegex(req.user.email)}$`, "i") },
         { $set: { hasStudioAccess: true, studioGrantedAt: now } }
       );
 
@@ -271,7 +273,7 @@ const registerStudioRoutes = (app, {
   // GET /studio/analytics — detailed creator analytics & charts
   app.get("/studio/analytics", verifyJWT, async (req, res) => {
     try {
-      const emailRegex = new RegExp(`^${req.user.email}$`, "i");
+      const emailRegex = new RegExp(`^${escapeRegex(req.user.email)}$`, "i");
 
       const courses = await coursesCollection.find({ instructorEmail: emailRegex }).toArray();
       const courseIds = courses.map((c) => c._id);
@@ -400,7 +402,7 @@ const registerStudioRoutes = (app, {
   // GET /studio/students — List instructor's enrolled students with search & filter
   app.get("/studio/students", verifyJWT, async (req, res) => {
     try {
-      const emailRegex = new RegExp(`^${req.user.email}$`, "i");
+      const emailRegex = new RegExp(`^${escapeRegex(req.user.email)}$`, "i");
       const { search = "", status = "all" } = req.query;
 
       const enrollments = await courseEnrollmentsCollection
@@ -1027,7 +1029,7 @@ const registerStudioRoutes = (app, {
           .find({ _id: { $in: enrollmentIds.map((id) => (ObjectId.isValid(id) ? new ObjectId(id) : id)) } })
           .toArray(),
         usersCollection
-          .find({ email: { $in: learnerEmails.map((e) => new RegExp(`^${e}$`, "i")) } })
+          .find({ email: { $in: learnerEmails.map((e) => new RegExp(`^${escapeRegex(e)}$`, "i")) } })
           .project({ email: 1, fullName: 1, name: 1, profileImage: 1 })
           .toArray(),
       ]);
@@ -1290,7 +1292,7 @@ const registerStudioRoutes = (app, {
       if (!courseReviewsCollection) {
         return res.json([]);
       }
-      const emailRegex = new RegExp(`^${req.user.email}$`, "i");
+      const emailRegex = new RegExp(`^${escapeRegex(req.user.email)}$`, "i");
       const reviews = await courseReviewsCollection
         .find({ instructorEmail: emailRegex })
         .sort({ createdAt: -1 })
@@ -1370,7 +1372,7 @@ const registerStudioRoutes = (app, {
   app.get("/studio/coupons", verifyJWT, async (req, res) => {
     try {
       if (!courseCouponsCollection) return res.json([]);
-      const emailRegex = new RegExp(`^${req.user.email}$`, "i");
+      const emailRegex = new RegExp(`^${escapeRegex(req.user.email)}$`, "i");
       const coupons = await courseCouponsCollection
         .find({ instructorEmail: emailRegex })
         .sort({ createdAt: -1 })
@@ -1385,7 +1387,7 @@ const registerStudioRoutes = (app, {
   app.get("/studio/audit-logs", verifyJWT, async (req, res) => {
     try {
       if (!studioAuditLogsCollection) return res.json([]);
-      const emailRegex = new RegExp(`^${req.user.email}$`, "i");
+      const emailRegex = new RegExp(`^${escapeRegex(req.user.email)}$`, "i");
       const logs = await studioAuditLogsCollection
         .find({ instructorEmail: emailRegex })
         .sort({ createdAt: -1 })

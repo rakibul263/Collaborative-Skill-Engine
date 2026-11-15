@@ -4,12 +4,56 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
+const { verifyJWT } = require("../middleware/verifyJWT");
+const { codeExecutionLimiter } = require("../middleware/rateLimiter");
+
+// Safe execution environment variables (stripped of MONGODB_URI, JWT_SECRET, etc.)
+const SAFE_EXEC_ENV = {
+  PATH: process.env.PATH || "/usr/local/bin:/usr/bin:/bin",
+  LANG: "en_US.UTF-8",
+  PYTHONIOENCODING: "utf-8",
+  NODE_ENV: "production",
+};
+
+// Forbidden Python modules & patterns that attempt host system escape
+const FORBIDDEN_PYTHON_PATTERNS = [
+  /\bimport\s+os\b/i,
+  /\bfrom\s+os\s+import\b/i,
+  /\bimport\s+subprocess\b/i,
+  /\bfrom\s+subprocess\s+import\b/i,
+  /\bimport\s+sys\b/i,
+  /\bfrom\s+sys\s+import\b/i,
+  /\bimport\s+shutil\b/i,
+  /\bfrom\s+shutil\s+import\b/i,
+  /\bimport\s+pty\b/i,
+  /\bimport\s+socket\b/i,
+  /\bfrom\s+socket\s+import\b/i,
+  /\bimport\s+ctypes\b/i,
+  /\b__import__\b/i,
+  /\bopen\s*\(/i,
+  /\beval\s*\(/i,
+  /\bexec\s*\(/i,
+  /\bcompile\s*\(/i,
+];
+
+// Forbidden C/C++ patterns that attempt host system escape
+const FORBIDDEN_CPP_PATTERNS = [
+  /#\s*include\s*<sys\//i,
+  /#\s*include\s*<unistd\.h>/i,
+  /#\s*include\s*<windows\.h>/i,
+  /\bsystem\s*\(/i,
+  /\bpopen\s*\(/i,
+  /\bfork\s*\(/i,
+  /\bexec[lvpe]*\s*\(/i,
+  /\bunlink\s*\(/i,
+  /\bremove\s*\(/i,
+];
 
 /**
  * Register code execution routes for real-time live pairing rooms & in-chat interactive code runner
  */
 const registerCodeExecutionRoutes = (app) => {
-  app.post("/api/code/run", async (req, res) => {
+  app.post("/api/code/run", verifyJWT, codeExecutionLimiter, async (req, res) => {
     const { language = "javascript", code = "", stdin = "" } = req.body || {};
     const startTime = Date.now();
 
@@ -25,6 +69,17 @@ const registerCodeExecutionRoutes = (app) => {
 
     // ── 1. JavaScript & TypeScript Execution via Node Isolated VM Context ──
     if (lang === "javascript" || lang === "typescript" || lang === "js" || lang === "ts") {
+      // Check for common prototype escape patterns
+      if (/process\s*\./i.test(code) || /require\s*\(/i.test(code) || /constructor\s*\.\s*constructor/i.test(code)) {
+        return res.json({
+          success: false,
+          error: "Security Policy: Direct process inspection, module imports, and prototype navigation are restricted.",
+          errorType: "SecurityException",
+          output: "",
+          durationMs: Date.now() - startTime,
+        });
+      }
+
       const logs = [];
       const stdinLines = (stdin || "").split("\n");
       let stdinIndex = 0;
@@ -34,40 +89,31 @@ const registerCodeExecutionRoutes = (app) => {
           log: (...args) =>
             logs.push(
               args
-                .map((a) =>
-                  typeof a === "object" ? JSON.stringify(a, null, 2) : String(a)
-                )
+                .map((a) => (typeof a === "object" ? JSON.stringify(a, null, 2) : String(a)))
                 .join(" ")
             ),
           error: (...args) =>
             logs.push(
               "[ERROR] " +
                 args
-                  .map((a) =>
-                    typeof a === "object" ? JSON.stringify(a, null, 2) : String(a)
-                  )
+                  .map((a) => (typeof a === "object" ? JSON.stringify(a, null, 2) : String(a)))
                   .join(" ")
             ),
           warn: (...args) =>
             logs.push(
               "[WARN] " +
                 args
-                  .map((a) =>
-                    typeof a === "object" ? JSON.stringify(a, null, 2) : String(a)
-                  )
+                  .map((a) => (typeof a === "object" ? JSON.stringify(a, null, 2) : String(a)))
                   .join(" ")
             ),
           info: (...args) =>
             logs.push(
               "[INFO] " +
                 args
-                  .map((a) =>
-                    typeof a === "object" ? JSON.stringify(a, null, 2) : String(a)
-                  )
+                  .map((a) => (typeof a === "object" ? JSON.stringify(a, null, 2) : String(a)))
                   .join(" ")
             ),
         },
-        // In-sandbox stdin emulation
         prompt: () => stdinLines[stdinIndex++] ?? "",
         readline: () => stdinLines[stdinIndex++] ?? "",
         stdin: (stdin || "").trim(),
@@ -94,10 +140,9 @@ const registerCodeExecutionRoutes = (app) => {
         const context = vm.createContext(sandbox);
         const result = script.runInContext(context, { timeout: 3500 });
         if (result !== undefined && logs.length === 0) {
-          logs.push(
-            typeof result === "object" ? JSON.stringify(result, null, 2) : String(result)
-          );
+          logs.push(typeof result === "object" ? JSON.stringify(result, null, 2) : String(result));
         }
+
         const durationMs = Date.now() - startTime;
         return res.json({
           success: true,
@@ -120,10 +165,28 @@ const registerCodeExecutionRoutes = (app) => {
       }
     }
 
-    // ── 2. Python Execution via python3 child_process ──
+    // ── 2. Python Execution via sandboxed child_process ──
     if (lang === "python" || lang === "py") {
+      // Static AST-like safety guard
+      for (const pattern of FORBIDDEN_PYTHON_PATTERNS) {
+        if (pattern.test(code)) {
+          return res.json({
+            success: false,
+            error: "Security Policy Violation: Host operating system access, file I/O, and process execution are restricted in this educational sandbox.",
+            errorType: "SecurityException",
+            output: "",
+            durationMs: Date.now() - startTime,
+          });
+        }
+      }
+
       try {
-        const child = spawn("python3", ["-c", code], { timeout: 5000 });
+        // Strip env completely to prevent reading process.env secrets
+        const child = spawn("python3", ["-c", code], {
+          timeout: 5000,
+          env: SAFE_EXEC_ENV,
+        });
+
         let stdout = "";
         let stderr = "";
 
@@ -132,7 +195,7 @@ const registerCodeExecutionRoutes = (app) => {
             child.stdin.write(stdin);
             child.stdin.end();
           } catch {
-            // ignore broken pipe if child exited immediately
+            // ignore broken pipe
           }
         }
 
@@ -195,6 +258,19 @@ const registerCodeExecutionRoutes = (app) => {
 
     // ── 3. C & C++ Execution via g++ / gcc ──
     if (lang === "cpp" || lang === "c++" || lang === "c") {
+      // Static security audit
+      for (const pattern of FORBIDDEN_CPP_PATTERNS) {
+        if (pattern.test(code)) {
+          return res.json({
+            success: false,
+            error: "Security Policy Violation: System-level headers and process execution calls are restricted in this sandbox.",
+            errorType: "SecurityException",
+            output: "",
+            durationMs: Date.now() - startTime,
+          });
+        }
+      }
+
       const tempId = `cse_${Date.now()}_${crypto.randomBytes(4).toString("hex")}`;
       const ext = lang === "c" ? ".c" : ".cpp";
       const sourcePath = path.join(os.tmpdir(), `${tempId}${ext}`);
@@ -208,9 +284,9 @@ const registerCodeExecutionRoutes = (app) => {
           ? ["-O2", "-Wall", sourcePath, "-o", binaryPath]
           : ["-O2", "-std=c++17", "-Wall", sourcePath, "-o", binaryPath];
 
-        // Step 1: Compilation
+        // Step 1: Compilation with clean env
         const compileResult = await new Promise((resolve) => {
-          const comp = spawn(compiler, compileArgs);
+          const comp = spawn(compiler, compileArgs, { env: SAFE_EXEC_ENV });
           let stderr = "";
           comp.stderr.on("data", (d) => {
             if (stderr.length < 50000) stderr += d.toString();
@@ -233,9 +309,12 @@ const registerCodeExecutionRoutes = (app) => {
           });
         }
 
-        // Step 2: Binary Execution
+        // Step 2: Binary Execution with clean env and timeout
         const runResult = await new Promise((resolve) => {
-          const child = spawn(binaryPath, [], { timeout: 4500 });
+          const child = spawn(binaryPath, [], {
+            timeout: 4500,
+            env: SAFE_EXEC_ENV,
+          });
           let stdout = "";
           let stderr = "";
 

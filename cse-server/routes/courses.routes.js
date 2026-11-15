@@ -6,6 +6,7 @@ const multer = require("multer");
 const jwt = require("jsonwebtoken");
 const cloudinary = require("cloudinary").v2;
 const { verifyJWT } = require("../middleware/verifyJWT");
+const { escapeRegex } = require("../utils/userLookup");
 const { calculateProfileCompletion, MIN_COURSE_CREATION_COMPLETION } = require("../utils/profileCompletion");
 const { detectReviewFraud, sanitizeIp } = require("../utils/geoSecurity");
 const {
@@ -413,7 +414,7 @@ const registerCoursesRoutes = (app, {
       if (!existingCert.instructorSignature && (course.instructorEmail || existingCert.instructorEmail)) {
         const instEmail = course.instructorEmail || existingCert.instructorEmail;
         const instUser = await usersCollection.findOne(
-          { email: new RegExp(`^${instEmail}$`, "i") },
+          { email: new RegExp(`^${escapeRegex(instEmail)}$`, "i") },
           { projection: { instructorSignature: 1 } }
         );
         if (instUser?.instructorSignature) {
@@ -553,22 +554,23 @@ const registerCoursesRoutes = (app, {
 
   // Helper: compute eligibility data for a user
   const getEligibilityData = async (email) => {
-    const userDoc = await usersCollection.findOne({ email: new RegExp(`^${email}$`, "i") });
+    const escaped = escapeRegex(email);
+    const userDoc = await usersCollection.findOne({ email: new RegExp(`^${escaped}$`, "i") });
     const profileStatus = calculateProfileCompletion(userDoc || {});
 
     const [ratingsResult, expiredSessions, existingCourses] = await Promise.all([
       ratingsCollection.aggregate([
-        { $match: { targetEmail: new RegExp(`^${email}$`, "i") } },
+        { $match: { targetEmail: new RegExp(`^${escaped}$`, "i") } },
         { $group: { _id: null, avg: { $avg: "$rating" } } },
       ]).toArray(),
       schedulesCollection.find({
         $or: [
-          { schedulerEmail: new RegExp(`^${email}$`, "i") },
-          { inviteeEmail: new RegExp(`^${email}$`, "i") },
+          { schedulerEmail: new RegExp(`^${escaped}$`, "i") },
+          { inviteeEmail: new RegExp(`^${escaped}$`, "i") },
         ],
         status: { $in: ["expired", "accepted", "completed"] },
       }).toArray(),
-      coursesCollection.find({ instructorEmail: new RegExp(`^${email}$`, "i") }, { projection: { topic: 1 } }).toArray(),
+      coursesCollection.find({ instructorEmail: new RegExp(`^${escaped}$`, "i") }, { projection: { topic: 1 } }).toArray(),
     ]);
 
     const averageRating = ratingsResult[0] ? Number((ratingsResult[0].avg).toFixed(2)) : 0;
@@ -668,7 +670,7 @@ const registerCoursesRoutes = (app, {
   // GET /courses/my-purchases — detailed buyer purchase history with invoice & progress metadata
   app.get("/courses/my-purchases", verifyJWT, async (req, res) => {
     try {
-      const buyerEmailRegex = new RegExp(`^${req.user.email}$`, "i");
+      const buyerEmailRegex = new RegExp(`^${escapeRegex(req.user.email)}$`, "i");
       const enrollments = await courseEnrollmentsCollection
         .find({ learnerEmail: buyerEmailRegex })
         .sort({ createdAt: -1 })
@@ -886,7 +888,7 @@ const registerCoursesRoutes = (app, {
 
       if (!cert.instructorSignature && cert.instructorEmail) {
         const instUser = await usersCollection.findOne(
-          { email: new RegExp(`^${cert.instructorEmail}$`, "i") },
+          { email: new RegExp(`^${escapeRegex(cert.instructorEmail)}$`, "i") },
           { projection: { instructorSignature: 1 } }
         );
         if (instUser?.instructorSignature) {
@@ -948,7 +950,7 @@ const registerCoursesRoutes = (app, {
       });
 
       const now = new Date().toISOString();
-      const reviewerUser = await usersCollection.findOne({ email: new RegExp(`^${reviewerEmail}$`, "i") });
+      const reviewerUser = await usersCollection.findOne({ email: new RegExp(`^${escapeRegex(reviewerEmail)}$`, "i") });
       const reviewerName = reviewerUser?.fullName || req.user.displayName || "Learner";
 
       const reviewDoc = {
@@ -1086,11 +1088,11 @@ const registerCoursesRoutes = (app, {
           ? coursesCollection.findOne({ _id: new ObjectId(String(enrollment.courseId)) })
           : null,
         usersCollection.findOne(
-          { email: new RegExp(`^${enrollment.learnerEmail}$`, "i") },
+          { email: new RegExp(`^${escapeRegex(enrollment.learnerEmail)}$`, "i") },
           { projection: { fullName: 1, name: 1, email: 1 } }
         ),
         usersCollection.findOne(
-          { email: new RegExp(`^${enrollment.instructorEmail}$`, "i") },
+          { email: new RegExp(`^${escapeRegex(enrollment.instructorEmail)}$`, "i") },
           { projection: { fullName: 1, name: 1, email: 1 } }
         ),
       ]);
@@ -1150,7 +1152,7 @@ const registerCoursesRoutes = (app, {
   app.get("/courses/earnings", verifyJWT, async (req, res) => {
     try {
       const enrollments = await courseEnrollmentsCollection
-        .find({ instructorEmail: new RegExp(`^${req.user.email}$`, "i") })
+        .find({ instructorEmail: new RegExp(`^${escapeRegex(req.user.email)}$`, "i") })
         .toArray();
       let totalEarningsPoisha = 0;
       for (const e of enrollments) {
@@ -1170,7 +1172,7 @@ const registerCoursesRoutes = (app, {
   app.get("/courses/mine", verifyJWT, async (req, res) => {
     try {
       const courses = await coursesCollection
-        .find({ instructorEmail: { $regex: new RegExp(`^${req.user.email}$`, "i") } })
+        .find({ instructorEmail: { $regex: new RegExp(`^${escapeRegex(req.user.email)}$`, "i") } })
         .sort({ createdAt: -1 })
         .toArray();
       return res.json(courses.map((c) => ({ ...c, _id: c._id.toString(), price: normalizeCoursePrice(c) })));
@@ -1249,7 +1251,7 @@ const registerCoursesRoutes = (app, {
       if (Object.keys(errors).length > 0) return res.status(400).json({ message: "Validation failed.", errors });
 
       // Verify original strict eligibility: At least 1 mentoring session + rating >= 4.0, or permanent studio access
-      const userDoc = await usersCollection.findOne({ email: new RegExp(`^${req.user.email}$`, "i") });
+      const userDoc = await usersCollection.findOne({ email: new RegExp(`^${escapeRegex(req.user.email)}$`, "i") });
       const eligibility = await getEligibilityData(req.user.email);
       
       if (!eligibility.canCreateCourse) {
@@ -2532,7 +2534,7 @@ const registerCoursesRoutes = (app, {
         if (!hasFullAccess) {
           const enrollment = await courseEnrollmentsCollection.findOne({
             courseId: new ObjectId(courseId),
-            learnerEmail: { $regex: new RegExp(`^${requesterEmail}$`, "i") },
+            learnerEmail: { $regex: new RegExp(`^${escapeRegex(requesterEmail)}$`, "i") },
           });
           if (enrollment && !enrollment.banned && !enrollment.suspended && !enrollment.refunded) {
             hasFullAccess = true;

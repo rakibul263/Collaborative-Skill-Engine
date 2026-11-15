@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const multer = require("multer");
+const { escapeRegex } = require("../utils/userLookup");
 const {
   SKILL_NODES,
   CAREER_TRACKS,
@@ -24,11 +25,15 @@ const upload = multer({
       "application/octet-stream",
       "binary/octet-stream",
     ];
-    if (hasAllowedExt || allowedMime.includes(file.mimetype)) {
+    if (!hasAllowedExt) {
+      cb(new Error("Only PDF, DOCX, and TXT files are allowed."));
+      return;
+    }
+    if (allowedMime.includes(file.mimetype)) {
       cb(null, true);
       return;
     }
-    cb(new Error("Only PDF, DOCX, and TXT files are allowed."));
+    cb(new Error("Invalid file MIME type. Only PDF, DOCX, and TXT files are allowed."));
   },
 });
 
@@ -79,7 +84,7 @@ const buildGapAnalysisWithResources = async ({
     const userDoc =
       (await usersCollection.findOne({ email: targetEmail })) ||
       (await usersCollection.findOne({
-        email: { $regex: new RegExp(`^${targetEmail}$`, "i") },
+        email: { $regex: new RegExp(`^${escapeRegex(targetEmail)}$`, "i") },
       }));
 
     if (userDoc) {
@@ -422,7 +427,7 @@ const registerSkillGraphRoutes = (
           }
 
           await usersCollection.updateOne(
-            { email: new RegExp(`^${targetEmail}$`, "i") },
+            { email: new RegExp(`^${escapeRegex(targetEmail)}$`, "i") },
             updateDoc
           );
         }

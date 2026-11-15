@@ -1,5 +1,6 @@
 const { ObjectId } = require("mongodb");
 const { verifyJWT } = require("../middleware/verifyJWT");
+const { escapeRegex } = require("../utils/userLookup");
 const { CURRENCY_CODE, fromPoisha, resolveEnrollmentPoisha } = require("../utils/money");
 
 const registerDashboardRoutes = (app, {
@@ -16,7 +17,7 @@ const registerDashboardRoutes = (app, {
   // Joins learner fullName from user_list.
   app.get("/dashboard/enrolled-students", verifyJWT, async (req, res) => {
     try {
-      const instructorEmailRegex = new RegExp(`^${req.user.email}$`, "i");
+      const instructorEmailRegex = new RegExp(`^${escapeRegex(req.user.email)}$`, "i");
 
       // Find all courses owned by this instructor
       const instructorCourses = await coursesCollection
@@ -82,7 +83,7 @@ const registerDashboardRoutes = (app, {
   // Returns totalEarnings, perCourse breakdown, and monthly breakdown for last 6 complete calendar months.
   app.get("/dashboard/earnings", verifyJWT, async (req, res) => {
     try {
-      const instructorEmailRegex = new RegExp(`^${req.user.email}$`, "i");
+      const instructorEmailRegex = new RegExp(`^${escapeRegex(req.user.email)}$`, "i");
 
       // Compute last 6 complete calendar months
       const now = new Date();
