@@ -2553,6 +2553,19 @@ async function run() {
 
 run().catch(console.dir);
 
+// Liveness probe used by Docker HEALTHCHECK / docker compose healthcheck.
+// Registered at the app level so it answers even while MongoDB is still
+// retrying its connection.
+app.get("/health", (req, res) => {
+  const mongoConnected = Boolean(client?.topology?.isConnected?.());
+  res.status(200).json({
+    status: mongoConnected ? "ok" : "starting",
+    uptime: Math.round(process.uptime()),
+    mongo: mongoConnected ? "connected" : "disconnected",
+    timestamp: new Date().toISOString(),
+  });
+});
+
 app.get("/", (req, res) => {
   res.json({
     status: "ok",
