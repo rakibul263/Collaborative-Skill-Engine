@@ -23,23 +23,21 @@ ENV NODE_ENV=production \
     PORT=3000
 
 # Remove unnecessary runtime bloat (Yarn, Corepack, system docs/man pages)
-# and create mount directory for persistent FAISS index storage
+# and create the mount point for persistent FAISS index storage
 RUN rm -rf /opt/yarn* /usr/local/lib/node_modules/corepack /usr/share/doc/* /usr/share/man/* && \
     mkdir -p /app/storage
 
-# Copy production node_modules from builder stage
+# Copy production node_modules from the builder stage
 COPY --from=builder /app/node_modules ./node_modules
 
-# Copy only required production server application files & directories
-COPY package.json index.js firebase-service-account.json ./
-COPY config ./config
-COPY controllers ./controllers
-COPY data ./data
-COPY middleware ./middleware
-COPY routes ./routes
-COPY services ./services
-COPY utils ./utils
+# Copy the application itself. Everything the runtime needs is allow-listed
+# via .dockerignore; optional files such as firebase-service-account.json
+# are picked up automatically when present in the build context.
+COPY . .
 
 EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=5 \
+  CMD node -e "require('http').get('http://127.0.0.1:'+(process.env.PORT||3000)+'/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"
 
 CMD ["node", "index.js"]

@@ -1,14 +1,31 @@
+# Dependencies & local state (rebuilt/mounted at runtime)
 node_modules
+storage
+coverage
+.nyc_output
+
+# VCS / CI
 .git
 .gitignore
-.DS_Store
+.github
+
+# Secrets are supplied at runtime via compose `env_file`, never baked in
 .env
-*.md
+.env.*
+!.env.example
+
+# OS & logs
+.DS_Store
 *.log
-__tests__
 npm-debug.log*
-.nyc_output
-coverage
-storage
+
+# Test suite (not part of the runtime image)
+__tests__
+
+# Platform-specific deploy configs (Railway / Nixpacks)
 nixpacks.toml
 railway.toml
+
+# Docs that are not needed inside the container
+/README.md
+/docs
