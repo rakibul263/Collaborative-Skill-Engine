@@ -31,6 +31,7 @@ const { initIpBlocker, isIpBlocked } = require("./utils/ipBlocker");
 const { parseClientIp } = require("./utils/deviceParser");
 const { detectReviewFraud, sanitizeIp } = require("./utils/geoSecurity");
 const { securityHeaders } = require("./middleware/securityHeaders");
+const { globalApiLimiter } = require("./middleware/rateLimiter");
 
 // ── Cloudinary initialisation (server-side; used only for deletion of old images)
 cloudinary.config({
@@ -73,10 +74,18 @@ const corsConfig = {
 };
 
 app.use(securityHeaders);
+app.use(globalApiLimiter);
 app.use(
   cors(corsConfig),
 );
-app.use(express.json({ limit: "10mb" }));
+app.use(
+  express.json({
+    limit: "10mb",
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  })
+);
 app.use(cookieParser());
 
 // ── Global IP restriction middleware ──
@@ -234,10 +243,12 @@ async function run() {
     await coursesCollection.createIndex({ createdAt: -1 });
     await coursesCollection.createIndex({ status: 1, createdAt: -1 });
     await coursesCollection.createIndex({ status: 1, category: 1 });
-    await coursesCollection.createIndex(
-      { instructorEmail: 1, topic: 1 },
-      { unique: true }
-    );
+    try {
+      await coursesCollection.dropIndex("instructorEmail_1_topic_1");
+    } catch {
+      // index may not exist or not have legacy unique constraint
+    }
+    await coursesCollection.createIndex({ instructorEmail: 1, topic: 1 });
     await courseEnrollmentsCollection.createIndex(
       { courseId: 1, learnerEmail: 1 },
       { unique: true }
@@ -757,6 +768,13 @@ async function run() {
         if (!rawEmail) return;
         const cleanEmail = String(rawEmail).trim();
         const lowerEmail = cleanEmail.toLowerCase();
+
+        // Prevent socket identity hijacking: once a socket is associated with an email,
+        // it cannot switch or join rooms for a different email address.
+        if (socket.data.lowerEmail && socket.data.lowerEmail !== lowerEmail) {
+          return;
+        }
+
         socket.data.email = cleanEmail;
         socket.data.lowerEmail = lowerEmail;
         socket.join(`user:${cleanEmail}`);
@@ -1091,13 +1109,13 @@ async function run() {
     // Fields that must never be overwritten by a client PATCH request
     const PROFILE_FIELD_BLOCKLIST = new Set([
       "_id", "email", "uid", "connections", "isDeactivated",
-      "role_system", "createdAt", "mongoId",
+      "role", "role_system", "createdAt", "mongoId",
     ]);
 
     // Only these fields are accepted in a profile update
     const PROFILE_ALLOWED_FIELDS = new Set([
       "fullName", "username", "profileImage", "profileImagePublicId",
-      "headline", "bio", "role",
+      "headline", "bio",
       "education", "location", "website", "github", "linkedin", "portfolio",
       "teachSkills", "learnSkills", "teachLevel", "learnLevel",
       "projects", "certificates",
