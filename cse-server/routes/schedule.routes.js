@@ -23,8 +23,15 @@ const registerScheduleRoutes = (
     }
 
     const { schedulerEmail, title, startTime, durationMinutes } = req.body;
+    const authEmail = (req.user?.email || "").toLowerCase().trim();
 
-    if (!schedulerEmail) {
+    if (schedulerEmail && schedulerEmail.toLowerCase().trim() !== authEmail) {
+      return res.status(403).json({ message: "You can only create schedules for yourself." });
+    }
+
+    const effectiveSchedulerEmail = authEmail || (schedulerEmail || "").toLowerCase().trim();
+
+    if (!effectiveSchedulerEmail) {
       return res.status(400).json({ message: "schedulerEmail is required" });
     }
 
@@ -65,11 +72,13 @@ const registerScheduleRoutes = (
         return res.status(403).json({ message: "Not allowed to schedule in this conversation" });
       }
 
-      if (!conversation.participants.includes(schedulerEmail)) {
+      const participantsLower = (conversation.participants || []).map((p) => String(p).toLowerCase().trim());
+      if (!participantsLower.includes(effectiveSchedulerEmail)) {
         return res.status(403).json({ message: "Not allowed to schedule in this conversation" });
       }
 
-      const inviteeEmail = conversation.participants.find((p) => p !== schedulerEmail);
+      const rawInvitee = conversation.participants.find((p) => String(p).toLowerCase().trim() !== effectiveSchedulerEmail);
+      const inviteeEmail = rawInvitee ? String(rawInvitee).trim() : "";
 
       // Reject if a pending or accepted schedule already exists
       const existingSchedule = await schedulesCollection.findOne({
@@ -84,7 +93,7 @@ const registerScheduleRoutes = (
       const now = new Date().toISOString();
       const scheduleDoc = {
         conversationId: new ObjectId(conversationId),
-        schedulerEmail,
+        schedulerEmail: effectiveSchedulerEmail,
         inviteeEmail,
         title: title.trim(),
         startTime: startDate.toISOString(),
@@ -129,19 +138,20 @@ const registerScheduleRoutes = (
       return res.status(400).json({ message: "Invalid conversation id" });
     }
 
-    const { requesterEmail } = req.query;
-
-    if (!requesterEmail) {
-      return res.status(400).json({ message: "requesterEmail is required" });
-    }
+    const authEmail = (req.user?.email || "").toLowerCase().trim();
 
     try {
-      // Verify requester is a participant
+      // Verify requester is an authenticated participant
       const conversation = await conversationsCollection.findOne({
         _id: new ObjectId(conversationId),
       });
 
-      if (!conversation || !conversation.participants.includes(requesterEmail)) {
+      if (!conversation) {
+        return res.status(404).json({ message: "Conversation not found" });
+      }
+
+      const participantsLower = (conversation.participants || []).map((p) => String(p).toLowerCase().trim());
+      if (!participantsLower.includes(authEmail)) {
         return res.status(403).json({ message: "Not allowed to view schedules for this conversation" });
       }
 
@@ -164,10 +174,10 @@ const registerScheduleRoutes = (
       return res.status(400).json({ message: "Invalid schedule id" });
     }
 
-    const { responderEmail, action } = req.body;
+    const { action } = req.body || {};
 
-    if (!responderEmail || !action) {
-      return res.status(400).json({ message: "responderEmail and action are required" });
+    if (!action) {
+      return res.status(400).json({ message: "action is required" });
     }
 
     if (!["accept", "reject"].includes(action)) {
@@ -183,7 +193,10 @@ const registerScheduleRoutes = (
         return res.status(404).json({ message: "Schedule not found" });
       }
 
-      if (responderEmail !== schedule.inviteeEmail) {
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      const inviteeLower = String(schedule.inviteeEmail || "").toLowerCase().trim();
+
+      if (authEmail !== inviteeLower) {
         return res.status(403).json({ message: "Only the invitee can respond to this schedule" });
       }
 

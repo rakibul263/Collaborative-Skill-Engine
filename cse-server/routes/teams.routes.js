@@ -113,6 +113,11 @@ const registerTeamsRoutes = (
   // POST /api/teams/create-squad — save official project team and auto-create Messenger Group Chat
   app.post("/api/teams/create-squad", verifyJWT, async (req, res) => {
     try {
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (!authEmail) {
+        return res.status(401).json({ message: "Authentication required." });
+      }
+
       const {
         teamName,
         projectTopic,
@@ -122,15 +127,23 @@ const registerTeamsRoutes = (
         leaderEmail,
       } = req.body;
 
-      if (!teamName || !leaderEmail || members.length < 2) {
-        return res.status(400).json({
-          message: "teamName, leaderEmail, and at least 2 members are required.",
+      // Lock leader to the verified authenticated user
+      const effectiveLeaderEmail = authEmail;
+      if (leaderEmail && leaderEmail.toLowerCase().trim() !== authEmail) {
+        return res.status(403).json({
+          message: "You can only create project squads where you are the team leader.",
         });
       }
 
-      const allMemberEmails = members.map((m) => m.email);
-      if (!allMemberEmails.includes(leaderEmail)) {
-        allMemberEmails.unshift(leaderEmail);
+      if (!teamName || members.length < 2) {
+        return res.status(400).json({
+          message: "teamName and at least 2 members are required.",
+        });
+      }
+
+      const allMemberEmails = members.map((m) => (m.email || "").toLowerCase().trim()).filter(Boolean);
+      if (!allMemberEmails.includes(effectiveLeaderEmail)) {
+        allMemberEmails.unshift(effectiveLeaderEmail);
       }
 
       // 1. Create team document in teamsCollection
@@ -138,18 +151,21 @@ const registerTeamsRoutes = (
         teamName,
         projectTopic: projectTopic || "Collaborative Project",
         description: description || `Project squad for "${teamName}"`,
-        leaderEmail,
-        members: members.map((m) => ({
-          email: m.email,
-          fullName: m.fullName || m.name || m.email.split("@")[0],
-          profileImage: m.profileImage || m.photoURL || "",
-          role: m.designatedRole || "Developer",
-          roleTitle: m.roleTitle || "Specialist",
-          fitPercent: m.fitPercent || 90,
-          matchingSkills: m.matchingSkills || [],
-          status: m.email === leaderEmail ? "accepted" : "invited",
-          joinedAt: m.email === leaderEmail ? new Date() : null,
-        })),
+        leaderEmail: effectiveLeaderEmail,
+        members: members.map((m) => {
+          const memEmail = (m.email || "").toLowerCase().trim();
+          return {
+            email: memEmail,
+            fullName: m.fullName || m.name || memEmail.split("@")[0],
+            profileImage: m.profileImage || m.photoURL || "",
+            role: m.designatedRole || "Developer",
+            roleTitle: m.roleTitle || "Specialist",
+            fitPercent: m.fitPercent || 90,
+            matchingSkills: m.matchingSkills || [],
+            status: memEmail === effectiveLeaderEmail ? "accepted" : "invited",
+            joinedAt: memEmail === effectiveLeaderEmail ? new Date() : null,
+          };
+        }),
         metrics,
         status: "active",
         createdAt: new Date(),
@@ -173,12 +189,12 @@ const registerTeamsRoutes = (
           groupName: teamName, // Project Title as Group Name!
           groupTopic: projectTopic || "Project Workspace",
           teamId,
-          leaderEmail,
+          leaderEmail: effectiveLeaderEmail,
           participants: allMemberEmails,
           unreadCounts,
           lastMessage: {
             text: `🚀 Project squad formed for: "${teamName}". Welcome to your team workspace! You can collaborate, share code, and start video meetings anytime.`,
-            senderEmail: leaderEmail,
+            senderEmail: effectiveLeaderEmail,
             createdAt: now,
           },
           lastMessageAt: now,
@@ -265,14 +281,21 @@ const registerTeamsRoutes = (
   // GET /api/teams/my-squads — list squads where user is leader or invited
   app.get("/api/teams/my-squads", verifyJWT, async (req, res) => {
     try {
-      const { email } = req.query;
-      if (!email) {
-        return res.status(400).json({ message: "email query parameter is required" });
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (!authEmail) {
+        return res.status(401).json({ message: "Authentication required." });
       }
+
+      // If client provides query email, verify it matches the authenticated user
+      if (req.query.email && req.query.email.toLowerCase().trim() !== authEmail) {
+        return res.status(403).json({ message: "Access denied. You can only view your own project squads." });
+      }
+
+      const emailRegex = new RegExp(`^${escapeRegex(authEmail)}$`, "i");
 
       const squads = await teamsCollection
         .find({
-          $or: [{ leaderEmail: email }, { "members.email": email }],
+          $or: [{ leaderEmail: emailRegex }, { "members.email": emailRegex }],
         })
         .sort({ createdAt: -1 })
         .toArray();
@@ -326,7 +349,15 @@ const registerTeamsRoutes = (
     try {
       const { teamId } = req.params;
       const { action } = req.body; // "accept" | "reject"
-      const userEmail = (req.user?.email || req.body.email || "").toLowerCase();
+      const userEmail = (req.user?.email || "").toLowerCase().trim();
+
+      if (!userEmail) {
+        return res.status(401).json({ message: "Authentication required." });
+      }
+
+      if (req.body?.email && req.body.email.toLowerCase().trim() !== userEmail) {
+        return res.status(403).json({ message: "Access denied. You can only respond to your own invitations." });
+      }
 
       if (!ObjectId.isValid(teamId)) {
         return res.status(400).json({ message: "Invalid team ID" });
@@ -556,11 +587,21 @@ const registerTeamsRoutes = (
     }
   });
 
-  // DELETE /api/teams/:teamId/members/:memberEmail — Admin removes a member from the squad and messenger group
+  // DELETE /api/teams/:teamId/members/:memberEmail — Team Leader removes a member from the squad and messenger group
   app.delete("/api/teams/:teamId/members/:memberEmail", verifyJWT, async (req, res) => {
     try {
       const { teamId, memberEmail } = req.params;
-      const requesterEmail = req.user?.email || req.query.requesterEmail;
+      const requesterEmail = (req.user?.email || "").toLowerCase().trim();
+      if (!requesterEmail) {
+        return res.status(401).json({ message: "Authentication required." });
+      }
+
+      if (req.query?.requesterEmail && req.query.requesterEmail.toLowerCase().trim() !== requesterEmail) {
+        return res.status(403).json({ message: "Access denied." });
+      }
+      if (req.body?.requesterEmail && req.body.requesterEmail.toLowerCase().trim() !== requesterEmail) {
+        return res.status(403).json({ message: "Access denied." });
+      }
 
       if (!ObjectId.isValid(teamId)) {
         return res.status(400).json({ message: "Invalid team ID" });
@@ -571,12 +612,15 @@ const registerTeamsRoutes = (
         return res.status(404).json({ message: "Team not found" });
       }
 
-      // Only the leader can remove members
-      if (team.leaderEmail !== requesterEmail) {
+      const teamLeaderEmail = (team.leaderEmail || "").toLowerCase().trim();
+      const targetMemberEmail = (memberEmail || "").toLowerCase().trim();
+
+      // Only the leader can remove members (case-insensitive)
+      if (teamLeaderEmail !== requesterEmail) {
         return res.status(403).json({ message: "Only the team leader can remove members" });
       }
 
-      if (memberEmail === team.leaderEmail) {
+      if (targetMemberEmail === teamLeaderEmail) {
         return res.status(400).json({ message: "Team leader cannot be removed from the team" });
       }
 
@@ -584,7 +628,7 @@ const registerTeamsRoutes = (
       await teamsCollection.updateOne(
         { _id: new ObjectId(teamId) },
         {
-          $pull: { members: { email: memberEmail } },
+          $pull: { members: { email: { $regex: new RegExp(`^${escapeRegex(targetMemberEmail)}$`, "i") } } },
           $set: { updatedAt: new Date() },
         }
       );
@@ -594,12 +638,12 @@ const registerTeamsRoutes = (
         await conversationsCollection.updateOne(
           { _id: new ObjectId(team.conversationId) },
           {
-            $pull: { participants: memberEmail },
+            $pull: { participants: { $regex: new RegExp(`^${escapeRegex(targetMemberEmail)}$`, "i") } },
             $set: { updatedAt: new Date().toISOString() },
           }
         );
 
-        io?.to(`user:${memberEmail}`).emit("conversation:updated");
+        io?.to(`user:${targetMemberEmail}`).emit("conversation:updated");
       }
 
       // Notify the removed member
@@ -637,12 +681,17 @@ const registerTeamsRoutes = (
   app.delete("/api/teams/:teamId", verifyJWT, async (req, res) => {
     try {
       const { teamId } = req.params;
-      const requesterEmail = (
-        req.user?.email ||
-        req.body?.requesterEmail ||
-        req.query?.requesterEmail ||
-        ""
-      ).toLowerCase();
+      const requesterEmail = (req.user?.email || "").toLowerCase().trim();
+      if (!requesterEmail) {
+        return res.status(401).json({ message: "Authentication required." });
+      }
+
+      if (req.body?.requesterEmail && req.body.requesterEmail.toLowerCase().trim() !== requesterEmail) {
+        return res.status(403).json({ message: "Permission denied." });
+      }
+      if (req.query?.requesterEmail && req.query.requesterEmail.toLowerCase().trim() !== requesterEmail) {
+        return res.status(403).json({ message: "Permission denied." });
+      }
 
       if (!ObjectId.isValid(teamId)) {
         return res.status(400).json({ message: "Invalid team ID" });
@@ -653,10 +702,10 @@ const registerTeamsRoutes = (
         return res.status(404).json({ message: "Team not found" });
       }
 
-      const leaderEmail = (team.leaderEmail || "").toLowerCase();
+      const leaderEmail = (team.leaderEmail || "").toLowerCase().trim();
 
-      // Only the team leader can delete the team
-      if (!requesterEmail || leaderEmail !== requesterEmail) {
+      // Only the team leader can delete the team (case-insensitive)
+      if (leaderEmail !== requesterEmail) {
         return res.status(403).json({
           message: "Permission denied. Only the team leader can delete this project team.",
         });
@@ -791,7 +840,10 @@ const registerTeamsRoutes = (
   app.post("/api/teams/:teamId/video-call", verifyJWT, async (req, res) => {
     try {
       const { teamId } = req.params;
-      const callerEmail = req.body.callerEmail || req.user?.email;
+      const callerEmail = (req.user?.email || "").toLowerCase().trim();
+      if (!callerEmail) {
+        return res.status(401).json({ message: "Authentication required." });
+      }
 
       if (!ObjectId.isValid(teamId)) {
         return res.status(400).json({ message: "Invalid team ID" });
@@ -802,7 +854,19 @@ const registerTeamsRoutes = (
         return res.status(404).json({ message: "Team not found" });
       }
 
-      const callerUser = await usersCollection.findOne({ email: callerEmail });
+      // Verify caller is the squad leader or a member
+      const isLeader = (team.leaderEmail || "").toLowerCase().trim() === callerEmail;
+      const isMember = (team.members || []).some(
+        (m) => (m.email || "").toLowerCase().trim() === callerEmail
+      );
+
+      if (!isLeader && !isMember) {
+        return res.status(403).json({ message: "Access denied. Only squad members can start a team video meeting." });
+      }
+
+      const callerUser = await usersCollection.findOne({
+        email: { $regex: new RegExp(`^${escapeRegex(callerEmail)}$`, "i") },
+      });
       const callerName = callerUser?.fullName || callerUser?.name || callerEmail.split("@")[0];
 
       // Broadcast meeting announcement into group conversation

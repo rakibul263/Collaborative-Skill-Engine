@@ -175,13 +175,14 @@ const ChatWorkspaceSkeleton = () => (
 const Message = () => {
   const { user } = useAuth();
   const location = useLocation();
-  const { peerFromQuery, conversationIdFromQuery, scheduleFromQuery, topicFromQuery } = useMemo(() => {
+  const { peerFromQuery, conversationIdFromQuery, scheduleFromQuery, topicFromQuery, autoJoinFromQuery } = useMemo(() => {
     const params = new URLSearchParams(location.search);
     return {
       peerFromQuery: params.get("peer"),
       conversationIdFromQuery: params.get("conversationId"),
       scheduleFromQuery: params.get("schedule") === "true",
       topicFromQuery: params.get("topic") || "",
+      autoJoinFromQuery: params.get("autoJoin") || "",
     };
   }, [location.search]);
 
@@ -204,6 +205,7 @@ const Message = () => {
   const [schedules, setSchedules] = useState([]);
   const [showScheduleModal, setShowScheduleModal] = useState(false);
   const autoScheduleTriggeredRef = useRef(false);
+  const autoJoinTriggeredRef = useRef("");
 
   useEffect(() => {
     if (activeConversation && scheduleFromQuery && !autoScheduleTriggeredRef.current) {
@@ -211,7 +213,32 @@ const Message = () => {
       setShowScheduleModal(true);
     }
   }, [activeConversation, scheduleFromQuery]);
+
+  // Auto-open the scheduled call when clicking "Join Meeting" from a notification
+  useEffect(() => {
+    if (!autoJoinFromQuery || !activeConversation || schedules.length === 0) return;
+    if (autoJoinTriggeredRef.current === autoJoinFromQuery) return;
+    const match = schedules.find(
+      (s) => String(s._id) === String(autoJoinFromQuery) && s.status === "accepted"
+    );
+    if (match) {
+      autoJoinTriggeredRef.current = autoJoinFromQuery;
+      setActiveCall(match);
+    }
+  }, [autoJoinFromQuery, activeConversation, schedules]);
   const [activeCall, setActiveCall] = useState(null);
+  const [incomingRtcOffer, setIncomingRtcOffer] = useState(null);
+  const [activeCallPeerEmail, setActiveCallPeerEmail] = useState(null);
+  const activeCallRef = useRef(null);
+  const schedulesRef = useRef([]);
+
+  useEffect(() => {
+    activeCallRef.current = activeCall;
+  }, [activeCall]);
+
+  useEffect(() => {
+    schedulesRef.current = schedules;
+  }, [schedules]);
   const [wallpaperTheme, setWallpaperTheme] = useState(() => {
     try {
       return localStorage.getItem("cse_chat_wallpaper") || "emerald";
@@ -899,10 +926,12 @@ const Message = () => {
     socket.on("schedule:expired", onScheduleExpired);
 
     const onRtcOffer = ({ from, offer, scheduleId }) => {
-      if (activeCall) return;
+      if (activeCallRef.current) return;
 
       // Group / Team Conversation: Allow instant video call anytime without schedule
       if (activeConversationRef.current?.isGroup) {
+        setIncomingRtcOffer({ from, offer, scheduleId });
+        setActiveCallPeerEmail(from || null);
         setActiveCall({
           _id: activeConversationRef.current._id,
           isInstantCall: true,
@@ -913,17 +942,28 @@ const Message = () => {
         return;
       }
 
-      // 1-on-1 Personal Chat: Strictly require an accepted schedule
-      const currentActiveSchedule = schedules.find(
-        (s) => s._id === scheduleId && s.status === "accepted"
+      // 1-on-1 Personal Chat: Require an accepted schedule (using live schedulesRef)
+      const currentActiveSchedule = schedulesRef.current.find(
+        (s) => String(s._id) === String(scheduleId) && s.status === "accepted"
       );
       if (currentActiveSchedule) {
+        setIncomingRtcOffer({ from, offer, scheduleId });
+        setActiveCallPeerEmail(from || null);
         setActiveCall(currentActiveSchedule);
       } else {
         console.warn("[WebRTC] Ignored call: 1-on-1 calls require an accepted schedule.");
       }
     };
     socket.on("rtc:offer", onRtcOffer);
+
+    const onMeetingPeerJoined = ({ from, senderName, scheduleTitle }) => {
+      if (activeCallRef.current) return;
+      if (from && user?.email && from.toLowerCase() === user.email.toLowerCase()) return;
+      toast.info(`${senderName || from || "Your partner"} joined "${scheduleTitle || "the meeting"}"!`, {
+        duration: 6000,
+      });
+    };
+    socket.on("meeting:peer-joined", onMeetingPeerJoined);
 
     return () => {
       socket.off("connect", onConnect);
@@ -938,6 +978,7 @@ const Message = () => {
       socket.off("schedule:updated", onScheduleUpdated);
       socket.off("schedule:expired", onScheduleExpired);
       socket.off("rtc:offer", onRtcOffer);
+      socket.off("meeting:peer-joined", onMeetingPeerJoined);
     };
   }, [user?.email, fetchConversations]);
 
@@ -1605,16 +1646,26 @@ const Message = () => {
           schedule={activeCall}
           currentUserEmail={user?.email}
           peerEmail={
-            activeConversation?.isGroup
-              ? (activeConversation.participants?.find((p) => {
-                  const em = typeof p === "string" ? p : p?.email;
-                  return em && em !== user?.email;
-                })?.email || "group")
-              : activeConversation?.peer?.email
+            activeCallPeerEmail ||
+            (activeConversation?.isGroup
+              ? (() => {
+                  const found = activeConversation.participants?.find((p) => {
+                    const em = typeof p === "string" ? p : p?.email;
+                    return em && em.toLowerCase() !== user?.email?.toLowerCase();
+                  });
+                  return (typeof found === "string" ? found : found?.email) || "group";
+                })()
+              : activeConversation?.peer?.email)
           }
-          socket={socketRef.current}
+          socket={getSocket()}
+          peerProfile={activeConversation?.isGroup ? null : activeConversation?.peer}
           serverOffset={serverOffsetRef.current}
-          onClose={() => setActiveCall(null)}
+          initialOffer={incomingRtcOffer}
+          onClose={() => {
+            setActiveCall(null);
+            setIncomingRtcOffer(null);
+            setActiveCallPeerEmail(null);
+          }}
         />
       )}
     </div>

@@ -287,24 +287,30 @@ const serializeCertificate = (doc, { includeEmail = true } = {}) => {
 const buildCertificateStatusPayload = ({
   totalVideos = 0,
   completedVideos = 0,
+  watchedVideos = null,
   percent = 0,
   certDoc = null,
   newlyIssued = false,
   eligible = false,
 }) => {
   const safePercent = Math.min(100, Math.max(0, Math.round(Number(percent) || 0)));
+  const effectiveWatched = watchedVideos !== null ? Number(watchedVideos) || 0 : Number(completedVideos) || 0;
+  const watchedPercent = totalVideos > 0 ? Math.min(100, Math.round((effectiveWatched / totalVideos) * 100)) : 0;
   const videosRequired = computeVideosRequiredForThreshold(totalVideos);
-  const unlocked = Boolean(certDoc) || (eligible && totalVideos > 0 && safePercent >= CERTIFICATE_THRESHOLD_PERCENT);
+  // Academic Integrity: Certificate unlocks only if certDoc already exists OR learner genuinely watched >= CERTIFICATE_THRESHOLD_PERCENT
+  const unlocked = Boolean(certDoc) || (eligible && totalVideos > 0 && watchedPercent >= CERTIFICATE_THRESHOLD_PERCENT);
   return {
     thresholdPercent: CERTIFICATE_THRESHOLD_PERCENT,
     unlocked,
     newlyIssued: Boolean(newlyIssued),
     currentPercent: safePercent,
-    remainingPercent: Math.max(0, CERTIFICATE_THRESHOLD_PERCENT - safePercent),
+    watchedPercent,
+    remainingPercent: Math.max(0, CERTIFICATE_THRESHOLD_PERCENT - watchedPercent),
     totalVideos,
     completedVideos,
+    watchedVideos: effectiveWatched,
     videosRequired,
-    videosNeeded: unlocked ? 0 : Math.max(0, videosRequired - completedVideos),
+    videosNeeded: unlocked ? 0 : Math.max(0, videosRequired - effectiveWatched),
     data: serializeCertificate(certDoc),
   };
 };
@@ -349,6 +355,7 @@ const registerCoursesRoutes = (app, {
     learnerEmail,
     totalVideos = 0,
     completedVideos = 0,
+    watchedVideos = null,
     percent = 0,
     allowIssue = false,
   }) => {
@@ -358,6 +365,9 @@ const registerCoursesRoutes = (app, {
     const cleanEmail = String(learnerEmail).trim().toLowerCase();
     const emailRegex = new RegExp(`^${cleanEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
     const courseObjId = courseId instanceof ObjectId ? courseId : new ObjectId(String(courseId));
+
+    const effectiveWatched = watchedVideos !== null ? Number(watchedVideos) || 0 : Number(completedVideos) || 0;
+    const watchedPercent = totalVideos > 0 ? Math.min(100, Math.round((effectiveWatched / totalVideos) * 100)) : 0;
 
     const [existingCert, learnerDoc] = await Promise.all([
       courseCertificatesCollection.findOne({ courseId: courseObjId, learnerEmail: cleanEmail }),
@@ -383,6 +393,10 @@ const registerCoursesRoutes = (app, {
         Number(completedVideos) || 0,
         Number(existingCert.completedVideos || 0)
       );
+      const nextWatched = Math.max(
+        effectiveWatched,
+        Number(existingCert.watchedVideos || 0)
+      );
       const nextTotal = Math.max(
         Number(totalVideos) || 0,
         Number(existingCert.totalVideos || 0)
@@ -392,6 +406,7 @@ const registerCoursesRoutes = (app, {
         resolvedRecipientName !== existingCert.recipientName ||
         nextPercent !== existingCert.completionPercent ||
         nextCompleted !== existingCert.completedVideos ||
+        nextWatched !== existingCert.watchedVideos ||
         nextTotal !== existingCert.totalVideos
       ) {
         await courseCertificatesCollection.updateOne(
@@ -401,6 +416,8 @@ const registerCoursesRoutes = (app, {
               recipientName: resolvedRecipientName,
               completionPercent: nextPercent,
               completedVideos: nextCompleted,
+              watchedVideos: nextWatched,
+              watchedPercent: Math.max(watchedPercent, Number(existingCert.watchedPercent || 0)),
               totalVideos: nextTotal,
             },
           }
@@ -408,6 +425,7 @@ const registerCoursesRoutes = (app, {
         existingCert.recipientName = resolvedRecipientName;
         existingCert.completionPercent = nextPercent;
         existingCert.completedVideos = nextCompleted;
+        existingCert.watchedVideos = nextWatched;
         existingCert.totalVideos = nextTotal;
       }
 
@@ -432,25 +450,30 @@ const registerCoursesRoutes = (app, {
       };
     }
 
-    if (!allowIssue || totalVideos <= 0 || percent < CERTIFICATE_THRESHOLD_PERCENT) {
+    // Academic Integrity Gate: Learner MUST have legitimately watched at least CERTIFICATE_THRESHOLD_PERCENT (skipped does not satisfy certification)
+    if (!allowIssue || totalVideos <= 0 || watchedPercent < CERTIFICATE_THRESHOLD_PERCENT) {
       return { cert: null, newlyIssued: false };
     }
 
     let resolvedInstructorName = course.instructorName?.trim() || "";
-    if (!resolvedInstructorName && course.instructorEmail) {
-      const instRegex = new RegExp(
-        `^${String(course.instructorEmail).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-        "i"
-      );
+    let instructorSignature = "";
+
+    if (course.instructorEmail) {
+      const instRegex = new RegExp(`^${escapeRegex(course.instructorEmail)}$`, "i");
       const instDoc = await usersCollection.findOne(
         { email: instRegex },
         { projection: { fullName: 1, name: 1, displayName: 1, instructorSignature: 1 } }
       );
-      resolvedInstructorName =
-        instDoc?.fullName?.trim() ||
-        instDoc?.name?.trim() ||
-        instDoc?.displayName?.trim() ||
-        course.instructorEmail.split("@")[0];
+      if (instDoc) {
+        if (!resolvedInstructorName) {
+          resolvedInstructorName =
+            instDoc.fullName?.trim() ||
+            instDoc.name?.trim() ||
+            instDoc.displayName?.trim() ||
+            course.instructorEmail.split("@")[0];
+        }
+        instructorSignature = instDoc.instructorSignature || "";
+      }
     }
 
     const nowDate = new Date();
@@ -464,11 +487,13 @@ const registerCoursesRoutes = (app, {
       courseTopic: course.topic || "Technology & Engineering",
       instructorEmail: course.instructorEmail || "",
       instructorName: resolvedInstructorName || "Course Instructor",
-      instructorSignature: instDoc?.instructorSignature || "",
+      instructorSignature: instructorSignature || "",
       platformName: PLATFORM_DISPLAY_NAME,
       totalVideos,
       completedVideos,
+      watchedVideos: effectiveWatched,
       completionPercent: Math.min(100, Math.round(percent)),
+      watchedPercent,
       thresholdPercent: CERTIFICATE_THRESHOLD_PERCENT,
       certificateCode: initialCode,
       issuedAt: nowIso,
@@ -937,6 +962,15 @@ const registerCoursesRoutes = (app, {
         return res.status(400).json({ message: "Instructors cannot review their own course." });
       }
 
+      // Ensure reviewer is actively enrolled in this course
+      const enrollment = await courseEnrollmentsCollection.findOne({
+        courseId: new ObjectId(id),
+        learnerEmail: reviewerEmail.toLowerCase(),
+      });
+      if (!enrollment || enrollment.refunded || enrollment.banned) {
+        return res.status(403).json({ message: "You must be actively enrolled in this course to leave a review." });
+      }
+
       const clientIp = req.headers["x-forwarded-for"] || req.socket.remoteAddress || req.ip || "127.0.0.1";
 
       // Sybil Review Fraud Detection
@@ -1375,19 +1409,32 @@ const registerCoursesRoutes = (app, {
     }
   });
 
-  // POST /courses/:id/enroll
+  // POST /courses/:id/enroll — Free course direct enrollment (Paid courses require checkout)
   app.post("/courses/:id/enroll", verifyJWT, async (req, res) => {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ message: "Invalid course id." });
     try {
       const course = await coursesCollection.findOne({ _id: new ObjectId(id) });
       if (!course || course.status !== "approved") return res.status(404).json({ message: "Course not found or not available." });
-      if (course.instructorEmail === req.user.email) return res.status(400).json({ message: "You cannot enroll in your own course." });
+      if (course.instructorEmail && course.instructorEmail.toLowerCase() === req.user.email.toLowerCase()) {
+        return res.status(400).json({ message: "You cannot enroll in your own course." });
+      }
 
-      const coursePriceBdt = Number.isFinite(course.pricePoisha)
-        ? fromPoisha(course.pricePoisha)
-        : course.price;
-      const split = splitRevenuePoisha(coursePriceBdt);
+      const coursePriceBdt = Number.isFinite(course.pricePoisha) && course.pricePoisha > 0
+        ? Math.round(course.pricePoisha / 100)
+        : Number(course.price || 0) >= 50000 && Number(course.price) % 100 === 0
+        ? Math.round(Number(course.price) / 100)
+        : Math.round(Number(course.price || 0));
+
+      if (coursePriceBdt > 0) {
+        return res.status(402).json({
+          message: "This is a premium paid course. Please complete enrollment via secure checkout.",
+          price: coursePriceBdt,
+          requiresPayment: true,
+        });
+      }
+
+      const split = splitRevenuePoisha(0);
       const nowDate = new Date();
       const now = nowDate.toISOString();
       const invoiceNumber = generateNewInvoiceNumber(nowDate);
@@ -1396,19 +1443,51 @@ const registerCoursesRoutes = (app, {
         courseId: new ObjectId(id),
         courseTitle: course.title,
         instructorEmail: course.instructorEmail,
-        learnerEmail: req.user.email,
+        learnerEmail: req.user.email.toLowerCase(),
         invoiceNumber,
-        currency: split.currency,
-        price: split.price,
-        pricePoisha: split.pricePoisha,
-        commission: split.commission,
-        commissionPoisha: split.commissionPoisha,
-        instructorEarnings: split.instructorEarnings,
-        instructorEarningsPoisha: split.instructorEarningsPoisha,
+        currency: split.currency || CURRENCY_CODE,
+        price: 0,
+        pricePoisha: 0,
+        commission: 0,
+        commissionPoisha: 0,
+        instructorEarnings: 0,
+        instructorEarningsPoisha: 0,
+        paymentMethod: "free",
+        status: "active",
+        refunded: false,
+        banned: false,
+        suspended: false,
         createdAt: now,
+        enrolledAt: now,
       };
 
       const result = await courseEnrollmentsCollection.insertOne(enrollmentDoc);
+
+      // Increment enrollment counter
+      await coursesCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $inc: { enrollmentCount: 1 } }
+      ).catch(() => {});
+
+      // Send confirmation notification
+      if (userNotificationsCollection) {
+        try {
+          const notif = {
+            recipientEmail: req.user.email.toLowerCase(),
+            type: "COURSE_ENROLLED",
+            title: "🎉 Enrollment Confirmed!",
+            message: `You have successfully enrolled in "${course.title}". Full lifetime access is now active.`,
+            extra: { courseId: course._id.toString(), invoiceNumber, courseTitle: course.title },
+            isRead: false,
+            createdAt: now,
+          };
+          await userNotificationsCollection.insertOne(notif);
+          if (io) {
+            io.to(`user:${req.user.email.toLowerCase()}`).emit("user-notification:new", notif);
+          }
+        } catch {}
+      }
+
       return res.status(201).json({ ...enrollmentDoc, _id: result.insertedId.toString(), courseId: id });
     } catch (err) {
       if (err?.code === 11000) return res.status(409).json({ message: "You are already enrolled in this course." });
@@ -1871,6 +1950,7 @@ const registerCoursesRoutes = (app, {
         learnerEmail: cleanEmail,
         totalVideos,
         completedVideos,
+        watchedVideos: watchedCount,
         percent,
         allowIssue: hasFullAccess,
       });
@@ -1879,6 +1959,7 @@ const registerCoursesRoutes = (app, {
         buildCertificateStatusPayload({
           totalVideos,
           completedVideos,
+          watchedVideos: watchedCount,
           percent,
           certDoc: cert,
           newlyIssued,
@@ -2451,6 +2532,7 @@ const registerCoursesRoutes = (app, {
       let certPayload = buildCertificateStatusPayload({
         totalVideos: courseTotalVideos,
         completedVideos: courseCompletedVideos,
+        watchedVideos: courseWatchedCount,
         percent: coursePercent,
         certDoc: null,
         newlyIssued: false,
@@ -2464,12 +2546,14 @@ const registerCoursesRoutes = (app, {
           learnerEmail: requester.email,
           totalVideos: courseTotalVideos,
           completedVideos: courseCompletedVideos,
+          watchedVideos: courseWatchedCount,
           percent: coursePercent,
           allowIssue: true,
         });
         certPayload = buildCertificateStatusPayload({
           totalVideos: courseTotalVideos,
           completedVideos: courseCompletedVideos,
+          watchedVideos: courseWatchedCount,
           percent: coursePercent,
           certDoc: cert,
           newlyIssued,
@@ -2603,6 +2687,7 @@ const registerCoursesRoutes = (app, {
           learnerEmail: requesterEmail,
           totalVideos,
           completedVideos,
+          watchedVideos: watchedCount,
           percent,
           allowIssue: hasFullAccess,
         });
@@ -2622,6 +2707,7 @@ const registerCoursesRoutes = (app, {
           certificate: buildCertificateStatusPayload({
             totalVideos,
             completedVideos,
+            watchedVideos: watchedCount,
             percent,
             certDoc: cert,
             newlyIssued,

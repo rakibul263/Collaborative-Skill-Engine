@@ -1,5 +1,6 @@
 const { ObjectId } = require("mongodb");
 const { verifyJWT } = require("../middleware/verifyJWT");
+const { escapeRegex } = require("../utils/userLookup");
 
 /**
  * User-specific persistent notifications.
@@ -19,12 +20,18 @@ const { verifyJWT } = require("../middleware/verifyJWT");
 
 const registerUserNotificationRoutes = (app, { userNotificationsCollection, io }) => {
 
-  // GET /user-notifications?email=xxx  — fetch latest 50 for a user (case-insensitive)
+  // GET /user-notifications?email=xxx  — fetch latest 50 for authenticated user (IDOR safe)
   app.get("/user-notifications", verifyJWT, async (req, res) => {
-    const rawEmail = req.query.email || req.user?.email;
-    if (!rawEmail) return res.status(400).json({ message: "email is required" });
+    const authEmail = (req.user?.email || "").toLowerCase().trim();
+    if (!authEmail) return res.status(401).json({ message: "Unauthorized" });
+
+    // Prevent IDOR: If email is provided in query, verify it matches the authenticated user
+    if (req.query.email && String(req.query.email).trim().toLowerCase() !== authEmail) {
+      return res.status(403).json({ message: "Access denied. You can only view your own notifications." });
+    }
+
     try {
-      const emailRegex = new RegExp(`^${String(rawEmail).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+      const emailRegex = new RegExp(`^${escapeRegex(authEmail)}$`, "i");
       const notifs = await userNotificationsCollection
         .find({ recipientEmail: emailRegex })
         .sort({ createdAt: -1 })
@@ -36,12 +43,17 @@ const registerUserNotificationRoutes = (app, { userNotificationsCollection, io }
     }
   });
 
-  // PATCH /user-notifications/read  — mark all as read for a user
+  // PATCH /user-notifications/read  — mark all as read for authenticated user (IDOR safe)
   app.patch("/user-notifications/read", verifyJWT, async (req, res) => {
-    const rawEmail = req.body.email || req.user?.email;
-    if (!rawEmail) return res.status(400).json({ message: "email is required" });
+    const authEmail = (req.user?.email || "").toLowerCase().trim();
+    if (!authEmail) return res.status(401).json({ message: "Unauthorized" });
+
+    if (req.body?.email && String(req.body.email).trim().toLowerCase() !== authEmail) {
+      return res.status(403).json({ message: "Access denied. You can only update your own notifications." });
+    }
+
     try {
-      const emailRegex = new RegExp(`^${String(rawEmail).trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i");
+      const emailRegex = new RegExp(`^${escapeRegex(authEmail)}$`, "i");
       await userNotificationsCollection.updateMany(
         { recipientEmail: emailRegex, isRead: false },
         { $set: { isRead: true } }
@@ -52,15 +64,24 @@ const registerUserNotificationRoutes = (app, { userNotificationsCollection, io }
     }
   });
 
-  // PATCH /user-notifications/:id/read  — mark single notification as read
+  // PATCH /user-notifications/:id/read  — mark single notification as read (IDOR safe)
   app.patch("/user-notifications/:id/read", verifyJWT, async (req, res) => {
     const { id } = req.params;
     if (!ObjectId.isValid(id)) return res.status(400).json({ message: "Invalid id" });
+
+    const authEmail = (req.user?.email || "").toLowerCase().trim();
+
     try {
-      await userNotificationsCollection.updateOne(
-        { _id: new ObjectId(id) },
+      const emailRegex = new RegExp(`^${escapeRegex(authEmail)}$`, "i");
+      const result = await userNotificationsCollection.updateOne(
+        { _id: new ObjectId(id), recipientEmail: emailRegex },
         { $set: { isRead: true } }
       );
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ message: "Notification not found or access denied." });
+      }
+
       return res.json({ message: "Marked as read" });
     } catch {
       return res.status(500).json({ message: "Failed to mark as read" });

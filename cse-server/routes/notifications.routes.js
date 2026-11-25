@@ -58,11 +58,8 @@ const registerNotificationRoutes = (app, { notificationsCollection, io }) => {
     }
   });
 
-  // DELETE — admin removes a notification (requires ADMIN_SECRET header or admin_token cookie)
-  app.delete("/notifications/:id", async (req, res) => {
-    if (!isAdminAuthed(req)) {
-      return res.status(403).json({ message: "Forbidden" });
-    }
+  // DELETE — admin removes a notification (protected by verifyAdminJWT)
+  app.delete("/notifications/:id", verifyAdminJWT, async (req, res) => {
     if (!ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ message: "Invalid id" });
     }

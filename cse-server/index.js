@@ -12,7 +12,7 @@ const { registerAiAdvisorRoutes } = require("./routes/aiAdvisor.routes");
 const { registerAuthRoutes } = require("./routes/auth.routes");
 const { registerNotificationRoutes } = require("./routes/notifications.routes");
 const { registerScheduleRoutes } = require("./routes/schedule.routes");
-const { registerUserNotificationRoutes } = require("./routes/userNotifications.routes");
+const { registerUserNotificationRoutes, createUserNotification } = require("./routes/userNotifications.routes");
 const { registerCoursesRoutes } = require("./routes/courses.routes");
 const { registerAdminRoutes } = require("./routes/admin.routes");
 const { registerDashboardRoutes } = require("./routes/dashboard.routes");
@@ -106,6 +106,10 @@ app.use((req, res, next) => {
 
 const io = new Server(httpServer, {
   cors: corsConfig,
+  transports: ["websocket", "polling"],
+  perMessageDeflate: false,
+  pingInterval: 15000,
+  pingTimeout: 10000,
 });
 
 const onlineUsers = new Map();
@@ -760,6 +764,53 @@ async function run() {
       );
     };
 
+    // ─── In-memory collaborative room state (Code + Whiteboard + Mode sync) ───
+    const collabRooms = new Map();
+    const getOrCreateCollabRoom = (roomId) => {
+      const key = String(roomId);
+      if (!collabRooms.has(key)) {
+        collabRooms.set(key, {
+          mode: "video",
+          language: "javascript",
+          yjsUpdates: [],
+          whiteboardStrokes: [],
+          chatMessages: [],
+          updatedAt: Date.now(),
+        });
+      }
+      return collabRooms.get(key);
+    };
+
+    const emitToUser = (targetEmail, eventName, payload) => {
+      if (!targetEmail) return;
+      const clean = String(targetEmail).trim();
+      const lower = clean.toLowerCase();
+      io.to(`user:${clean}`).emit(eventName, payload);
+      if (lower !== clean) {
+        io.to(`user:${lower}`).emit(eventName, payload);
+      }
+    };
+
+    const hasUserSockets = (targetEmail) => {
+      if (!targetEmail) return false;
+      const clean = String(targetEmail).trim();
+      const lower = clean.toLowerCase();
+      const r1 = io.sockets.adapter.rooms.get(`user:${clean}`);
+      const r2 = lower !== clean ? io.sockets.adapter.rooms.get(`user:${lower}`) : null;
+      return Boolean((r1 && r1.size > 0) || (r2 && r2.size > 0));
+    };
+
+    const relayRtcSignal = (socket, to, roomId, eventName, payload) => {
+      if (to && to !== "group") {
+        emitToUser(to, eventName, payload);
+        if (!hasUserSockets(to) && roomId) {
+          socket.to(`code-room:${roomId}`).emit(eventName, payload);
+        }
+      } else if (roomId) {
+        socket.to(`code-room:${roomId}`).emit(eventName, payload);
+      }
+    };
+
     io.on("connection", (socket) => {
       // Immediately send current list of online users to newly connected socket
       socket.emit("presence:online-users", getOnlineEmails());
@@ -990,45 +1041,175 @@ async function run() {
         }
       });
 
-      socket.on("rtc:offer", ({ to, offer, scheduleId }) => {
-        if (!to || !offer) return;
-        io.to(`user:${to}`).emit("rtc:offer", {
-          from: socket.data.email,
+      socket.on("rtc:join-call", async ({ to, roomId, scheduleId, scheduleTitle, user }) => {
+        try {
+          const callerEmail = String(user?.email || socket.data.email || "").trim().toLowerCase();
+          if (!callerEmail) return;
+
+          let callerName = user?.name || callerEmail.split("@")[0];
+          let callerImage = "";
+          try {
+            const callerDoc = await usersCollection.findOne(
+              { email: { $regex: new RegExp(`^${callerEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } },
+              { projection: { fullName: 1, name: 1, profileImage: 1 } }
+            );
+            if (callerDoc) {
+              callerName = callerDoc.fullName || callerDoc.name || callerName;
+              callerImage = callerDoc.profileImage || "";
+            }
+          } catch {
+            // fallback to email prefix
+          }
+
+          const titleText = scheduleTitle || "Scheduled Meeting";
+          const actionUrl = `/message?peer=${encodeURIComponent(callerEmail)}${
+            scheduleId ? `&autoJoin=${encodeURIComponent(String(scheduleId))}` : ""
+          }`;
+
+          const notifyRecipient = async (recipient) => {
+            const cleanTarget = String(recipient || "").trim().toLowerCase();
+            if (!cleanTarget || cleanTarget === callerEmail || cleanTarget === "group") return;
+
+            if (userNotificationsCollection) {
+              const saved = await createUserNotification(userNotificationsCollection, null, {
+                recipientEmail: cleanTarget,
+                type: "meeting_joined",
+                title: `${callerName} joined the meeting`,
+                message: `${callerName} has joined "${titleText}". Click to join the call now!`,
+                scheduleId: scheduleId || null,
+              });
+
+              emitToUser(cleanTarget, "user-notification:new", {
+                ...saved,
+                senderName: callerName,
+                senderEmail: callerEmail,
+                senderImage: callerImage,
+                actionUrl,
+              });
+            }
+
+            emitToUser(cleanTarget, "meeting:peer-joined", {
+              from: callerEmail,
+              senderName: callerName,
+              senderImage: callerImage,
+              roomId,
+              scheduleId: scheduleId || null,
+              scheduleTitle: titleText,
+              actionUrl,
+            });
+          };
+
+          if (to && to !== "group") {
+            await notifyRecipient(to);
+          } else if (roomId && ObjectId.isValid(String(roomId))) {
+            // Group / conversation call: notify all other participants
+            const conv = await conversationsCollection.findOne({ _id: new ObjectId(String(roomId)) });
+            if (conv && Array.isArray(conv.participants)) {
+              for (const p of conv.participants) {
+                const em = typeof p === "string" ? p : p?.email;
+                if (em) await notifyRecipient(em);
+              }
+            }
+          }
+        } catch (err) {
+          console.warn("[rtc:join-call] notification error:", err.message);
+        }
+      });
+
+      socket.on("rtc:ready", ({ to, roomId, scheduleId, from }) => {
+        const sender = from || socket.data.email;
+        const payload = {
+          from: sender,
+          roomId,
+          scheduleId,
+        };
+        if (to && to !== "group") {
+          emitToUser(to, "rtc:ready", payload);
+        }
+        if (roomId) {
+          socket.to(`code-room:${roomId}`).emit("rtc:ready", payload);
+        }
+      });
+
+      socket.on("rtc:offer", ({ to, offer, scheduleId, roomId, from }) => {
+        if (!offer) return;
+        const payload = {
+          from: from || socket.data.email,
           offer,
           scheduleId,
-        });
+          roomId,
+        };
+        relayRtcSignal(socket, to, roomId, "rtc:offer", payload);
       });
 
-      socket.on("rtc:answer", ({ to, answer, scheduleId }) => {
-        if (!to || !answer) return;
-        io.to(`user:${to}`).emit("rtc:answer", {
-          from: socket.data.email,
+      socket.on("rtc:answer", ({ to, answer, scheduleId, roomId, from }) => {
+        if (!answer) return;
+        const payload = {
+          from: from || socket.data.email,
           answer,
           scheduleId,
-        });
+          roomId,
+        };
+        relayRtcSignal(socket, to, roomId, "rtc:answer", payload);
       });
 
-      socket.on("rtc:ice-candidate", ({ to, candidate }) => {
-        if (!to || !candidate) return;
-        io.to(`user:${to}`).emit("rtc:ice-candidate", {
-          from: socket.data.email,
+      socket.on("rtc:ice-candidate", ({ to, candidate, roomId, from }) => {
+        if (!candidate) return;
+        const payload = {
+          from: from || socket.data.email,
           candidate,
-        });
+          roomId,
+        };
+        relayRtcSignal(socket, to, roomId, "rtc:ice-candidate", payload);
       });
 
-      socket.on("rtc:end", ({ to, scheduleId }) => {
-        if (!to) return;
-        io.to(`user:${to}`).emit("rtc:ended", {
+      socket.on("rtc:media-state", ({ to, roomId, isMuted, isCameraOff, isScreenSharing, cameraStreamId, screenStreamId }) => {
+        const payload = {
+          from: socket.data.email,
+          roomId,
+          isMuted: Boolean(isMuted),
+          isCameraOff: Boolean(isCameraOff),
+          isScreenSharing: Boolean(isScreenSharing),
+          cameraStreamId: cameraStreamId || null,
+          screenStreamId: screenStreamId || null,
+        };
+        if (to && to !== "group") {
+          emitToUser(to, "rtc:media-state", payload);
+        }
+        if (roomId) {
+          socket.to(`code-room:${roomId}`).emit("rtc:media-state", payload);
+        }
+      });
+
+      socket.on("rtc:end", ({ to, roomId, scheduleId }) => {
+        const payload = {
           from: socket.data.email,
           scheduleId,
-        });
+        };
+        if (to && to !== "group") {
+          emitToUser(to, "rtc:ended", payload);
+        }
+        if (roomId) {
+          socket.to(`code-room:${roomId}`).emit("rtc:ended", payload);
+        }
       });
 
-      // ─── Real-time Live Code Pairing (Monaco + Yjs CRDT & Cursors) ───
+      // ─── Real-time Live Collaboration Room (Code + Whiteboard + View Mode) ───
       socket.on("code:join-room", ({ roomId, user }) => {
         if (!roomId) return;
         const roomName = `code-room:${roomId}`;
         socket.join(roomName);
+
+        const roomState = getOrCreateCollabRoom(roomId);
+        socket.emit("collab:room-init", {
+          roomId,
+          mode: roomState.mode,
+          language: roomState.language,
+          yjsUpdates: roomState.yjsUpdates,
+          whiteboardStrokes: roomState.whiteboardStrokes,
+          chatMessages: roomState.chatMessages,
+        });
+
         socket.to(roomName).emit("code:peer-joined", {
           socketId: socket.id,
           user: user || { email: socket.data.email },
@@ -1045,11 +1226,58 @@ async function run() {
         });
       });
 
+      socket.on("collab:mode-change", ({ roomId, mode, user }) => {
+        if (!roomId || !mode) return;
+        const roomState = getOrCreateCollabRoom(roomId);
+        roomState.mode = mode;
+        roomState.updatedAt = Date.now();
+        socket.to(`code-room:${roomId}`).emit("collab:mode-change", {
+          mode,
+          user: user || { email: socket.data.email },
+        });
+      });
+
       socket.on("code:yjs-update", ({ roomId, update, user }) => {
         if (!roomId || !update) return;
+        const roomState = getOrCreateCollabRoom(roomId);
+        roomState.yjsUpdates.push(update);
+        if (roomState.yjsUpdates.length > 5000) {
+          roomState.yjsUpdates = roomState.yjsUpdates.slice(-4000);
+        }
+        roomState.updatedAt = Date.now();
         socket.to(`code-room:${roomId}`).emit("code:yjs-update", {
           update,
           user,
+        });
+      });
+
+      socket.on("code:reset", ({ roomId, update, language, user }) => {
+        if (!roomId) return;
+        const roomState = getOrCreateCollabRoom(roomId);
+        roomState.yjsUpdates = update ? [update] : [];
+        if (language) roomState.language = language;
+        roomState.updatedAt = Date.now();
+        if (update) {
+          socket.to(`code-room:${roomId}`).emit("code:yjs-update", {
+            update,
+            user,
+          });
+        }
+      });
+
+      socket.on("code:request-sync", ({ roomId }) => {
+        if (!roomId) return;
+        const roomState = getOrCreateCollabRoom(roomId);
+        socket.emit("collab:room-init", {
+          roomId,
+          mode: roomState.mode,
+          language: roomState.language,
+          yjsUpdates: roomState.yjsUpdates,
+          whiteboardStrokes: roomState.whiteboardStrokes,
+          chatMessages: roomState.chatMessages,
+        });
+        socket.to(`code-room:${roomId}`).emit("code:request-sync", {
+          requesterSocketId: socket.id,
         });
       });
 
@@ -1064,6 +1292,9 @@ async function run() {
 
       socket.on("code:language-change", ({ roomId, language, user }) => {
         if (!roomId || !language) return;
+        const roomState = getOrCreateCollabRoom(roomId);
+        roomState.language = language;
+        roomState.updatedAt = Date.now();
         socket.to(`code-room:${roomId}`).emit("code:language-change", {
           language,
           user,
@@ -1086,6 +1317,74 @@ async function run() {
           language,
           user,
           durationMs,
+        });
+      });
+
+      socket.on("code:quick-chat", ({ roomId, to, message }) => {
+        if (!roomId || !message) return;
+        const roomState = getOrCreateCollabRoom(roomId);
+        if (!roomState.chatMessages.some((m) => String(m.id) === String(message.id))) {
+          roomState.chatMessages.push(message);
+          if (roomState.chatMessages.length > 200) {
+            roomState.chatMessages = roomState.chatMessages.slice(-200);
+          }
+        }
+        roomState.updatedAt = Date.now();
+        socket.to(`code-room:${roomId}`).emit("code:quick-chat", { roomId, message });
+        if (to && to !== "group") {
+          emitToUser(to, "code:quick-chat", { roomId, message });
+        }
+      });
+
+      // ─── Real-Time Collaborative Whiteboard Sync ───
+      socket.on("whiteboard:draw-live", ({ roomId, stroke, user }) => {
+        if (!roomId || !stroke) return;
+        socket.to(`code-room:${roomId}`).emit("whiteboard:draw-live", {
+          stroke,
+          user: user || { email: socket.data.email },
+        });
+      });
+
+      socket.on("whiteboard:draw", ({ roomId, stroke, user }) => {
+        if (!roomId || !stroke) return;
+        const roomState = getOrCreateCollabRoom(roomId);
+        if (!roomState.whiteboardStrokes.some((s) => s.id === stroke.id)) {
+          roomState.whiteboardStrokes.push(stroke);
+          if (roomState.whiteboardStrokes.length > 2000) {
+            roomState.whiteboardStrokes = roomState.whiteboardStrokes.slice(-1500);
+          }
+        }
+        roomState.updatedAt = Date.now();
+        socket.to(`code-room:${roomId}`).emit("whiteboard:draw", {
+          stroke,
+          user: user || { email: socket.data.email },
+        });
+      });
+
+      socket.on("whiteboard:undo", ({ roomId, strokeId, user }) => {
+        if (!roomId) return;
+        const roomState = getOrCreateCollabRoom(roomId);
+        if (strokeId) {
+          roomState.whiteboardStrokes = roomState.whiteboardStrokes.filter(
+            (s) => s.id !== strokeId,
+          );
+        } else {
+          roomState.whiteboardStrokes.pop();
+        }
+        roomState.updatedAt = Date.now();
+        socket.to(`code-room:${roomId}`).emit("whiteboard:undo", {
+          strokeId,
+          user: user || { email: socket.data.email },
+        });
+      });
+
+      socket.on("whiteboard:clear", ({ roomId, user }) => {
+        if (!roomId) return;
+        const roomState = getOrCreateCollabRoom(roomId);
+        roomState.whiteboardStrokes = [];
+        roomState.updatedAt = Date.now();
+        socket.to(`code-room:${roomId}`).emit("whiteboard:clear", {
+          user: user || { email: socket.data.email },
         });
       });
 
@@ -1282,6 +1581,13 @@ async function run() {
           .send({ message: "senderEmail and receiverEmail are required" });
       }
 
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (senderEmail && senderEmail.toLowerCase().trim() !== authEmail) {
+        return res
+          .status(403)
+          .send({ message: "You can only send connection requests on your own behalf" });
+      }
+
       if (senderEmail === receiverEmail) {
         return res
           .status(400)
@@ -1373,6 +1679,13 @@ async function run() {
           .send({ message: "senderEmail and receiverEmail are required" });
       }
 
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (senderEmail && senderEmail.toLowerCase().trim() !== authEmail) {
+        return res
+          .status(403)
+          .send({ message: "You can only cancel your own sent requests" });
+      }
+
       try {
         const result = await connectionRequestsCollection.deleteOne({
           senderEmail,
@@ -1406,7 +1719,8 @@ async function run() {
         return res.status(400).send({ message: "Invalid action" });
       }
 
-      if (responderEmail !== receiverEmail) {
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (receiverEmail.toLowerCase().trim() !== authEmail || (responderEmail && responderEmail.toLowerCase().trim() !== authEmail)) {
         return res
           .status(403)
           .send({ message: "Only receiver can accept or reject" });
@@ -1473,6 +1787,11 @@ async function run() {
         return res.status(400).send({ message: "email is required" });
       }
 
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (email && email.toLowerCase().trim() !== authEmail) {
+        return res.status(403).send({ message: "Access denied. You can only view your own incoming requests." });
+      }
+
       try {
         const requests = await connectionRequestsCollection
           .find({ receiverEmail: email, status: "pending" })
@@ -1485,11 +1804,16 @@ async function run() {
       }
     });
 
-    app.get("/connections/requests/status", async (req, res) => {
+    app.get("/connections/requests/status", verifyJWT, async (req, res) => {
       const { email } = req.query;
 
       if (!email) {
         return res.status(400).send({ message: "email is required" });
+      }
+
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (email && email.toLowerCase().trim() !== authEmail) {
+        return res.status(403).send({ message: "Access denied. You can only view your own request statuses." });
       }
 
       try {
@@ -1515,6 +1839,12 @@ async function run() {
         return res
           .status(400)
           .send({ message: "requesterEmail and peerEmail are required" });
+      }
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (requesterEmail && requesterEmail.toLowerCase().trim() !== authEmail) {
+        return res
+          .status(403)
+          .send({ message: "You can only open conversations on your own behalf" });
       }
       if (requesterEmail === peerEmail) {
         return res
@@ -1575,6 +1905,11 @@ async function run() {
         return res.status(400).send({ message: "email is required" });
       }
 
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (email.toLowerCase().trim() !== authEmail) {
+        return res.status(403).send({ message: "Access denied. You can only view your own conversations." });
+      }
+
       try {
         const conversations = await conversationsCollection
           .find({ participants: email })
@@ -1615,13 +1950,18 @@ async function run() {
 
     app.get("/conversations/:id/messages", verifyJWT, async (req, res) => {
       const conversationId = req.params.id;
-      const { requesterEmail } = req.query;
+      const { requesterEmail, limit: queryLimit, before } = req.query;
 
       if (!ObjectId.isValid(conversationId)) {
         return res.status(400).send({ message: "Invalid conversation id" });
       }
       if (!requesterEmail) {
         return res.status(400).send({ message: "requesterEmail is required" });
+      }
+
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (requesterEmail.toLowerCase().trim() !== authEmail) {
+        return res.status(403).send({ message: "Access denied. You can only view messages on your own behalf." });
       }
 
       try {
@@ -1635,10 +1975,27 @@ async function run() {
             .send({ message: "Not allowed to view this conversation" });
         }
 
+        const maxLimit = 200;
+        const defaultLimit = 100;
+        const parsedLimit = parseInt(queryLimit, 10);
+        const limit = Number.isInteger(parsedLimit) && parsedLimit > 0
+          ? Math.min(parsedLimit, maxLimit)
+          : defaultLimit;
+
+        const filter = { conversationId: conversation._id };
+        if (before && typeof before === "string") {
+          filter.createdAt = { $lt: before.trim() };
+        }
+
+        // Safe bounded fetch: retrieve the latest messages to prevent V8 memory exhaustion / OOM
         const messages = await messagesCollection
-          .find({ conversationId: conversation._id })
-          .sort({ createdAt: 1 })
+          .find(filter)
+          .sort({ createdAt: -1 })
+          .limit(limit)
           .toArray();
+
+        // Reverse back into chronological ascending order for UI consumption
+        messages.reverse();
 
         return res.send(messages.map(serializeMessage));
       } catch (error) {
@@ -1657,6 +2014,11 @@ async function run() {
         return res.status(400).send({ message: "senderEmail is required" });
       }
 
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (senderEmail.toLowerCase().trim() !== authEmail) {
+        return res.status(403).send({ message: "You can only send messages as yourself." });
+      }
+
       try {
         const message = await createMessage({
           conversationId,
@@ -1670,16 +2032,20 @@ async function run() {
       }
     });
 
-    app.patch("/messages/:id", async (req, res) => {
+    app.patch("/messages/:id", verifyJWT, async (req, res) => {
       const messageId = req.params.id;
       const { editorEmail, text } = req.body;
       const cleanText = (text || "").trim();
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
 
       if (!ObjectId.isValid(messageId)) {
         return res.status(400).send({ message: "Invalid message id" });
       }
       if (!editorEmail) {
         return res.status(400).send({ message: "editorEmail is required" });
+      }
+      if (editorEmail.toLowerCase().trim() !== authEmail) {
+        return res.status(403).send({ message: "You can only edit your own message" });
       }
 
       try {
@@ -1727,15 +2093,19 @@ async function run() {
       }
     });
 
-    app.delete("/messages/:id", async (req, res) => {
+    app.delete("/messages/:id", verifyJWT, async (req, res) => {
       const messageId = req.params.id;
       const requesterEmail = req.query.requesterEmail;
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
 
       if (!ObjectId.isValid(messageId)) {
         return res.status(400).send({ message: "Invalid message id" });
       }
       if (!requesterEmail) {
         return res.status(400).send({ message: "requesterEmail is required" });
+      }
+      if (requesterEmail.toLowerCase().trim() !== authEmail) {
+        return res.status(403).send({ message: "You can only delete your own message" });
       }
 
       try {
@@ -1774,6 +2144,11 @@ async function run() {
       }
       if (!viewerEmail) {
         return res.status(400).send({ message: "viewerEmail is required" });
+      }
+
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (viewerEmail && viewerEmail.toLowerCase().trim() !== authEmail) {
+        return res.status(403).send({ message: "Access denied. You can only mark seen for yourself." });
       }
 
       try {
@@ -1834,6 +2209,10 @@ async function run() {
         return res
           .status(400)
           .send({ message: "reviewerEmail, targetEmail and rating are required" });
+      }
+      const authEmail = (req.user?.email || "").toLowerCase().trim();
+      if (reviewerEmail && reviewerEmail.toLowerCase().trim() !== authEmail) {
+        return res.status(403).send({ message: "You can only submit ratings on your own behalf." });
       }
       if (reviewerEmail === targetEmail) {
         return res.status(400).send({ message: "Cannot rate yourself" });
@@ -1977,16 +2356,31 @@ async function run() {
 
     app.post("/users", async (req, res) => {
       try {
-        const user = req.body;
+        const body = req.body || {};
+        if (!body.email || typeof body.email !== "string" || !body.email.trim()) {
+          return res.status(400).json({ success: false, message: "Email is required." });
+        }
+
+        const cleanEmail = body.email.trim().toLowerCase();
         const existingUser = await usersCollection.findOne({
-          email: user.email,
+          email: cleanEmail,
         });
 
         if (existingUser) {
           return res.send({ message: "User already exists" });
         }
 
-        const result = await usersCollection.insertOne(user);
+        // Hard-lock sensitive fields: new registrations are strictly role="user"
+        const { role, isDeactivated, role_system, password, _id, ...safePayload } = body;
+        const userToInsert = {
+          ...safePayload,
+          email: cleanEmail,
+          role: "user",
+          isDeactivated: false,
+          createdAt: safePayload.createdAt || new Date().toISOString(),
+        };
+
+        const result = await usersCollection.insertOne(userToInsert);
         res.send(result);
       } catch (error) {
         res.status(500).send(error);
@@ -2007,7 +2401,10 @@ async function run() {
         // Normalize to lowercase so lookup is case-insensitive
         const email = rawEmail.trim().toLowerCase();
 
-        const user = await usersCollection.findOne({ email });
+        const user = await usersCollection.findOne(
+          { email },
+          { projection: { password: 0 } }
+        );
 
         if (!user) {
           return res.status(404).json({
@@ -2016,7 +2413,12 @@ async function run() {
           });
         }
 
-        // Return the raw user document directly (existing frontend contract)
+        // Never leak credentials publicly
+        if (user.password) {
+          delete user.password;
+        }
+
+        // Return the user document directly (existing frontend contract)
         res.json(user);
       } catch (error) {
         console.error("[GET /users] Error:", error.message);

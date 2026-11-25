@@ -64,6 +64,15 @@ const BottomNotificationPopup = () => {
         return;
       }
 
+      // Don't show meeting join popup if user is already inside the video call overlay
+      if (
+        data.type === "meeting_joined" &&
+        typeof document !== "undefined" &&
+        document.body.classList.contains("video-call-active")
+      ) {
+        return;
+      }
+
       // Play sound
       playNotificationSound("chime");
 
@@ -136,14 +145,15 @@ const BottomNotificationPopup = () => {
       triggerPopup(payload);
     };
 
-    // 2. Persistent user notification event (course updates, appeals, replies)
+    // 2. Persistent user notification event (course updates, appeals, replies, meeting joins)
     const handleUserNotification = (notif) => {
       if (!notif) return;
       if (
         notif.type === "chat_message" ||
         notif.type === "course_appeal" ||
         notif.type === "appeal_reply" ||
-        notif.type === "restriction_lifted"
+        notif.type === "restriction_lifted" ||
+        notif.type === "meeting_joined"
       ) {
         triggerPopup(notif);
       }
@@ -214,6 +224,8 @@ const BottomNotificationPopup = () => {
                     ? "STUDENT APPEAL"
                     : activePopup.type === "appeal_reply"
                     ? "INSTRUCTOR REPLY"
+                    : activePopup.type === "meeting_joined"
+                    ? "MEETING JOINED"
                     : "NEW SMS / MESSAGE"}
                 </span>
               </div>
@@ -282,7 +294,13 @@ const BottomNotificationPopup = () => {
                 onClick={handleOpenAction}
                 className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white text-xs font-bold shadow-lg shadow-indigo-600/30 transition-all cursor-pointer active:scale-95"
               >
-                <span>{activePopup.type === "course_appeal" ? "Open Appeals" : "Open Chat"}</span>
+                <span>
+                  {activePopup.type === "course_appeal"
+                    ? "Open Appeals"
+                    : activePopup.type === "meeting_joined"
+                    ? "Join Meeting"
+                    : "Open Chat"}
+                </span>
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>

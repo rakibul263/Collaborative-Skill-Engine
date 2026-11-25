@@ -335,6 +335,7 @@ const registerPaymentRoutes = (app, {
 
     const sig = req.headers["stripe-signature"];
     const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+    const isProduction = process.env.NODE_ENV === "production";
 
     let event;
 
@@ -342,8 +343,11 @@ const registerPaymentRoutes = (app, {
       if (webhookSecret && sig) {
         const payload = req.rawBody || req.body;
         event = stripe.webhooks.constructEvent(payload, sig, webhookSecret);
+      } else if (isProduction) {
+        console.error("[Stripe Webhook Blocked]: Missing webhookSecret or stripe-signature in production.");
+        return res.status(400).send("Webhook signature verification required in production.");
       } else {
-        // Fallback for dev / test mode if webhook secret not set
+        // Fallback strictly for local non-production developer test mode
         event = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
       }
     } catch (err) {
