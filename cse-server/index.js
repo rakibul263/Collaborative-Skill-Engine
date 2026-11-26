@@ -82,7 +82,7 @@ const isAllowedProjectOrigin = (cleanOrigin) => {
   if (allowedOrigins.includes(cleanOrigin)) return true;
   return (
     /^http:\/\/localhost:\d+$/.test(cleanOrigin) ||
-    /^https:\/\/(cse-client|collaborat[a-z0-9-]*)(-[a-z0-9-]+)*\.vercel\.app$/i.test(cleanOrigin)
+    /^https:\/\/[a-z0-9-]+\.vercel\.app$/i.test(cleanOrigin)
   );
 };
 

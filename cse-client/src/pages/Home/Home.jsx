@@ -148,9 +148,9 @@ const Home = () => {
   useEffect(() => {
     let active = true;
     let retryTimer = null;
-    const loadStats = (allowRetry = true) => {
+    const loadStats = (attempt = 0) => {
       axios
-        .get(`${API}/platform-stats`, { timeout: 25000 })
+        .get(`${API}/platform-stats`, { timeout: 65000 })
         .then((r) => {
           if (!active) return;
           setStats(r.data || {});
@@ -158,14 +158,14 @@ const Home = () => {
         })
         .catch(() => {
           if (!active) return;
-          if (allowRetry) {
-            retryTimer = setTimeout(() => loadStats(false), 3000);
+          if (attempt < 3) {
+            retryTimer = setTimeout(() => loadStats(attempt + 1), 3000);
           } else {
             setStatsLoaded(true);
           }
         });
     };
-    loadStats(true);
+    loadStats(0);
     return () => {
       active = false;
       if (retryTimer) clearTimeout(retryTimer);

@@ -45,12 +45,25 @@ const Login = () => {
   // Security guard: must be relative path
   const from = candidateFrom.startsWith("/") && !candidateFrom.startsWith("//") ? candidateFrom : "/";
 
-  // If user is already logged in (e.g. navigated to /login directly), redirect out
+  // If user is already logged in (or returned from Google redirect), route cleanly
   useEffect(() => {
-    if (user) {
-      navigate(from, { replace: true });
+    if (!user) return;
+    const googleNewUser = sessionStorage.getItem("googleNewUser");
+    if (googleNewUser) {
+      sessionStorage.removeItem("googleNewUser");
+      try {
+        const googleData = JSON.parse(googleNewUser);
+        navigate(`/register${from !== "/" ? `?returnUrl=${encodeURIComponent(from)}` : ""}`, {
+          state: { fromGoogle: true, googleUser: googleData, returnUrl: from },
+          replace: true,
+        });
+        return;
+      } catch {
+        // Fallback to normal navigation if malformed
+      }
     }
-  }, [user, from]);
+    navigate(from, { replace: true });
+  }, [user, from, navigate]);
 
   const handleInputChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
@@ -275,7 +288,8 @@ const Login = () => {
               <LoginButton
                 onClick={async () => {
                   try {
-                    await signInWithGoogle();
+                    const authResult = await signInWithGoogle();
+                    if (authResult?.redirected) return;
                     // Check if new user was flagged (set by signInWithGoogle in AuthProvider)
                     const googleNewUser = sessionStorage.getItem("googleNewUser");
                     if (googleNewUser) {

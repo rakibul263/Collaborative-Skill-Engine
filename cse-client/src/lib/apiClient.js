@@ -128,9 +128,9 @@ apiClient.interceptors.response.use(
 
     if (original && method === "get" && isColdStartTransient) {
       original._coldRetryCount = original._coldRetryCount || 0;
-      if (original._coldRetryCount < 2) {
+      if (original._coldRetryCount < 3) {
         original._coldRetryCount += 1;
-        await new Promise((r) => setTimeout(r, 2500));
+        await new Promise((r) => setTimeout(r, 3000));
         return apiClient(original);
       }
     }

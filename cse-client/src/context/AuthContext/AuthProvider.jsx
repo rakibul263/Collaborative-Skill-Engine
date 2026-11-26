@@ -8,6 +8,8 @@ import {
   signOut,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   sendPasswordResetEmail,
   updateProfile as updateFirebaseProfile,
 } from "firebase/auth";
@@ -105,35 +107,14 @@ const AuthProvider = ({ children } = {}) => {
     }
   };
 
-  const signInWithGoogle = async () => {
-    if (!auth) {
-      throw new Error("Firebase Auth is not configured. Please set VITE_apiKey in cse-client/.env");
-    }
-    const provider = new GoogleAuthProvider();
-    provider.setCustomParameters({ prompt: "select_account" });
+  const syncGoogleUserState = useCallback(async (firebaseUser) => {
+    if (!firebaseUser?.email) return;
     try {
-      const result = await signInWithPopup(auth, provider);
-      const firebaseUser = result.user;
-
-      // Check if this Google user already exists in DB
-      try {
-        const res = await axios.get(
-          `${API_URL}/users?email=${encodeURIComponent(firebaseUser.email)}`
-        );
-        if (!res.data) {
-          // New user — flag so the caller can redirect to /register
-          sessionStorage.setItem(
-            "googleNewUser",
-            JSON.stringify({
-              fullName: firebaseUser.displayName || "",
-              email: firebaseUser.email,
-              profileImage: firebaseUser.photoURL || "",
-              uid: firebaseUser.uid,
-            })
-          );
-        }
-      } catch {
-        // DB check failed — treat as new user
+      const res = await axios.get(
+        `${API_URL}/users?email=${encodeURIComponent(firebaseUser.email)}`,
+        { timeout: 30000 }
+      );
+      if (!res.data) {
         sessionStorage.setItem(
           "googleNewUser",
           JSON.stringify({
@@ -143,10 +124,40 @@ const AuthProvider = ({ children } = {}) => {
             uid: firebaseUser.uid,
           })
         );
+      } else {
+        sessionStorage.removeItem("googleNewUser");
       }
+    } catch {
+      sessionStorage.setItem(
+        "googleNewUser",
+        JSON.stringify({
+          fullName: firebaseUser.displayName || "",
+          email: firebaseUser.email,
+          profileImage: firebaseUser.photoURL || "",
+          uid: firebaseUser.uid,
+        })
+      );
+    }
+  }, []);
 
+  const signInWithGoogle = async () => {
+    if (!auth) {
+      throw new Error("Firebase Auth is not configured. Please set VITE_apiKey in cse-client/.env");
+    }
+    const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
+    try {
+      const result = await signInWithPopup(auth, provider);
+      await syncGoogleUserState(result.user);
       return result;
     } catch (error) {
+      if (
+        error?.code === "auth/popup-blocked" ||
+        error?.code === "auth/operation-not-supported-in-this-environment"
+      ) {
+        await signInWithRedirect(auth, provider);
+        return { redirected: true };
+      }
       throw error;
     }
   };
@@ -253,11 +264,24 @@ const AuthProvider = ({ children } = {}) => {
       setLoading(false);
       return;
     }
+    let isMounted = true;
     let heartbeatInterval = null;
     let onConnectHandler = null;
     let visibilityHandler = null;
+    let unSubscribe = () => {};
 
-    const unSubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    (async () => {
+      try {
+        const redirectResult = await getRedirectResult(auth);
+        if (redirectResult?.user) {
+          await syncGoogleUserState(redirectResult.user);
+        }
+      } catch (err) {
+        console.warn("[Auth] Google redirect result warning:", err?.message);
+      }
+      if (!isMounted) return;
+
+      unSubscribe = onAuthStateChanged(auth, async (currentUser) => {
       const socket = getSocket();
 
       if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -330,8 +354,10 @@ const AuthProvider = ({ children } = {}) => {
           console.warn("[Auth] Profile enrichment warning:", err.message);
         }
       }
-    });
+      });
+    })();
     return () => {
+      isMounted = false;
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (onConnectHandler) {
         const socket = getSocket();
@@ -342,7 +368,7 @@ const AuthProvider = ({ children } = {}) => {
       }
       unSubscribe();
     };
-  }, []);
+  }, [syncGoogleUserState]);
 
   const authInfo = {
     user,

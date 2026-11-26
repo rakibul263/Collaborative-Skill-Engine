@@ -272,11 +272,25 @@ const Register = () => {
     termsAccepted: false,
   });
 
-  // If redirected from Login with Google data, pre-fill and jump to step 2
+  // If redirected from Login or Google OAuth redirect fallback, pre-fill and jump to step 2
   useEffect(() => {
     const state = location.state;
-    if (state?.fromGoogle && state?.googleUser) {
-      const { fullName, email, profileImage, uid } = state.googleUser;
+    let googleUser = state?.fromGoogle && state?.googleUser ? state.googleUser : null;
+
+    if (!googleUser) {
+      const stored = sessionStorage.getItem("googleNewUser");
+      if (stored) {
+        sessionStorage.removeItem("googleNewUser");
+        try {
+          googleUser = JSON.parse(stored);
+        } catch {
+          googleUser = null;
+        }
+      }
+    }
+
+    if (googleUser) {
+      const { fullName, email, profileImage, uid } = googleUser;
       setFormData((prev) => ({
         ...prev,
         fullName: fullName || "",
@@ -645,7 +659,8 @@ const Register = () => {
                 <LoginButton
                   onClick={async () => {
                     try {
-                      await signInWithGoogle();
+                      const authResult = await signInWithGoogle();
+                      if (authResult?.redirected) return;
                       // Check if flagged as new user by signInWithGoogle in AuthProvider
                       const stored = sessionStorage.getItem("googleNewUser");
                       if (stored) {
