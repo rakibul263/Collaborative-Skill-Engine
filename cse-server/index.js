@@ -78,14 +78,22 @@ const allowedOrigins = Array.from(
   )
 );
 
+const isAllowedProjectOrigin = (cleanOrigin) => {
+  if (allowedOrigins.includes(cleanOrigin)) return true;
+  return (
+    /^http:\/\/localhost:\d+$/.test(cleanOrigin) ||
+    /^https:\/\/(cse-client|collaborat[a-z0-9-]*)(-[a-z0-9-]+)*\.vercel\.app$/i.test(cleanOrigin)
+  );
+};
+
 const corsConfig = {
   origin: (origin, callback) => {
     if (!origin) return callback(null, true);
     const clean = normalizeOrigin(origin);
-    if (allowedOrigins.includes(clean)) {
+    if (isAllowedProjectOrigin(clean)) {
       return callback(null, true);
     }
-    return callback(new Error(`CORS blocked for origin: ${origin}`));
+    return callback(null, false);
   },
   credentials: true,
 };

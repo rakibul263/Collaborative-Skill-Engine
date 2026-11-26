@@ -146,13 +146,30 @@ const Home = () => {
   const [statsLoaded, setStatsLoaded] = useState(false);
 
   useEffect(() => {
-    axios
-      .get(`${API}/platform-stats`)
-      .then((r) => {
-        setStats(r.data || {});
-        setStatsLoaded(true);
-      })
-      .catch(() => setStatsLoaded(true));
+    let active = true;
+    let retryTimer = null;
+    const loadStats = (allowRetry = true) => {
+      axios
+        .get(`${API}/platform-stats`, { timeout: 25000 })
+        .then((r) => {
+          if (!active) return;
+          setStats(r.data || {});
+          setStatsLoaded(true);
+        })
+        .catch(() => {
+          if (!active) return;
+          if (allowRetry) {
+            retryTimer = setTimeout(() => loadStats(false), 3000);
+          } else {
+            setStatsLoaded(true);
+          }
+        });
+    };
+    loadStats(true);
+    return () => {
+      active = false;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
   }, []);
 
   useEffect(() => {
