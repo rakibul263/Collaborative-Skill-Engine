@@ -335,6 +335,7 @@ const Message = () => {
       try {
         const res = await apiClient.get(`/conversations?email=${encodeURIComponent(user.email)}`, {
           timeout: 60000,
+          forceRefresh: attempt > 0,
         });
         const list = Array.isArray(res.data) ? res.data : [];
         setConversations(list);

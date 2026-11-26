@@ -1,5 +1,5 @@
 const jwt = require("jsonwebtoken");
-const { getFirebaseAdmin } = require("../config/firebaseAdmin");
+const { verifyFirebaseIdToken } = require("../config/firebaseAdmin");
 
 const verifyJWT = async (req, res, next) => {
   const header = req.headers.authorization || "";
@@ -20,17 +20,14 @@ const verifyJWT = async (req, res, next) => {
   } catch (jwtError) {
     // Seamless fallback: if client passed a valid Firebase ID token (e.g. during cold start or token exchange race)
     try {
-      const firebaseAdmin = getFirebaseAdmin();
-      if (firebaseAdmin) {
-        const fbDecoded = await firebaseAdmin.auth().verifyIdToken(token);
-        if (fbDecoded?.email) {
-          req.user = {
-            uid: fbDecoded.uid,
-            email: fbDecoded.email.toLowerCase(),
-            mongoId: null,
-          };
-          return next();
-        }
+      const fbDecoded = await verifyFirebaseIdToken(token);
+      if (fbDecoded?.email) {
+        req.user = {
+          uid: fbDecoded.uid,
+          email: fbDecoded.email.toLowerCase(),
+          mongoId: null,
+        };
+        return next();
       }
     } catch {
       // ignore Firebase fallback failure and report standard JWT error

@@ -1,4 +1,4 @@
-const { getFirebaseAdmin } = require("../config/firebaseAdmin");
+const { verifyFirebaseIdToken } = require("../config/firebaseAdmin");
 
 const verifyFirebaseToken = async (req, res, next) => {
   try {
@@ -11,15 +11,7 @@ const verifyFirebaseToken = async (req, res, next) => {
       });
     }
 
-    const firebaseAdmin = getFirebaseAdmin();
-    if (!firebaseAdmin) {
-      return res.status(503).json({
-        message:
-          "Firebase Admin is not configured on the server. Add FIREBASE_SERVICE_ACCOUNT_JSON to .env.",
-      });
-    }
-
-    const decoded = await firebaseAdmin.auth().verifyIdToken(token);
+    const decoded = await verifyFirebaseIdToken(token);
 
     if (!decoded.email) {
       return res.status(401).json({

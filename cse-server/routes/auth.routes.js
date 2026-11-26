@@ -1,5 +1,5 @@
 const jwt = require("jsonwebtoken");
-const { getFirebaseAdmin } = require("../config/firebaseAdmin");
+const { verifyFirebaseIdToken } = require("../config/firebaseAdmin");
 const { findUserByEmail, normalizeEmail } = require("../utils/userLookup");
 const { parseClientIp, parseUserAgent } = require("../utils/deviceParser");
 const { resolveGeoLocation, detectImpossibleTravel } = require("../utils/geoSecurity");
@@ -32,12 +32,7 @@ const registerAuthRoutes = (app, {
         return res.status(400).json({ message: "Firebase token is required." });
       }
 
-      const firebaseAdmin = getFirebaseAdmin();
-      if (!firebaseAdmin) {
-        return res.status(503).json({ message: "Firebase Admin not configured." });
-      }
-
-      const decoded = await firebaseAdmin.auth().verifyIdToken(firebaseToken);
+      const decoded = await verifyFirebaseIdToken(firebaseToken);
       if (!decoded.email) {
         return res.status(401).json({ message: "Token missing email." });
       }
