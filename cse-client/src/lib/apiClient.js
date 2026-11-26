@@ -20,7 +20,18 @@ export const exchangeToken = async () => {
       if (!currentUser) return null;
 
       const firebaseToken = await currentUser.getIdToken(true);
-      const res = await axios.post(`${API_URL}/auth/token`, { firebaseToken });
+      let res;
+      try {
+        res = await axios.post(`${API_URL}/auth/token`, { firebaseToken }, { timeout: 30000 });
+      } catch (firstErr) {
+        const status = firstErr?.response?.status;
+        if (!status || status === 502 || status === 503 || status === 504) {
+          await new Promise((r) => setTimeout(r, 3000));
+          res = await axios.post(`${API_URL}/auth/token`, { firebaseToken }, { timeout: 30000 });
+        } else {
+          throw firstErr;
+        }
+      }
 
       if (res.data?.token) {
         setJWT(res.data.token);
@@ -111,8 +122,21 @@ apiClient.interceptors.response.use(
     }
 
     const original = error.config;
+    const method = (original?.method || "get").toLowerCase();
+    const status = error.response?.status;
+    const isColdStartTransient = !error.response || status === 502 || status === 503 || status === 504;
+
+    if (original && method === "get" && isColdStartTransient) {
+      original._coldRetryCount = original._coldRetryCount || 0;
+      if (original._coldRetryCount < 2) {
+        original._coldRetryCount += 1;
+        await new Promise((r) => setTimeout(r, 2500));
+        return apiClient(original);
+      }
+    }
+
     if (
-      error.response?.status === 401 &&
+      status === 401 &&
       original &&
       !original._retry &&
       !original.url?.includes("/auth/token")

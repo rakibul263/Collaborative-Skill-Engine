@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
+import { initServerWarmup } from "./lib/serverWarmup";
 import { RouterProvider } from "react-router";
 import { router } from "./router/router.jsx";
 import AOS from "aos";
@@ -9,6 +10,7 @@ import AuthProvider from "./context/AuthContext/AuthProvider.jsx";
 import { AppToaster } from "@/components/ui/toast-system";
 import { GlobalConfirmProvider } from "@/components/ui/confirm-dialog";
 
+initServerWarmup();
 AOS.init();
 createRoot(document.getElementById("root")).render(
   <StrictMode>
