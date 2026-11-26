@@ -39,29 +39,32 @@ const CoursesMarketplace = () => {
   const [enrolledIds, setEnrolledIds] = useState(() => new Set());
 
   // Fetch published courses with auto-retry on network/boot delay
-  const fetchCourses = useCallback(async (isRetry = false) => {
+  const fetchCourses = useCallback(async () => {
     setLoading(true);
     setError("");
-    try {
-      const res = await apiClient.get("/courses/public");
-      setAllCourses(res.data || []);
-    } catch (err) {
-      console.warn("apiClient fetch error, attempting direct axios fallback:", err?.message);
+    const attemptLoad = async (attempt = 0) => {
       try {
-        const fallbackRes = await axios.get(`${API}/courses/public`);
-        setAllCourses(fallbackRes.data || []);
-      } catch (fallbackErr) {
-        console.error("Courses fallback fetch error:", fallbackErr?.message);
-        if (!isRetry) {
-          // Automatic single retry in case server was restarting
-          setTimeout(() => fetchCourses(true), 1500);
-          return;
+        const res = await apiClient.get("/courses/public", { timeout: 65000 });
+        setAllCourses(res.data || []);
+        setLoading(false);
+      } catch (err) {
+        console.warn("apiClient fetch error, attempting direct axios fallback:", err?.message);
+        try {
+          const fallbackRes = await axios.get(`${API}/courses/public`, { timeout: 65000 });
+          setAllCourses(fallbackRes.data || []);
+          setLoading(false);
+        } catch (fallbackErr) {
+          console.error("Courses fallback fetch error:", fallbackErr?.message);
+          if (attempt < 2) {
+            setTimeout(() => attemptLoad(attempt + 1), 2500);
+            return;
+          }
+          setError("Unable to load courses from marketplace. Please try again later.");
+          setLoading(false);
         }
-        setError("Unable to load courses from marketplace. Please try again later.");
       }
-    } finally {
-      setLoading(false);
-    }
+    };
+    await attemptLoad(0);
   }, []);
 
   useEffect(() => {
@@ -170,26 +173,28 @@ const CoursesMarketplace = () => {
             </p>
 
             {/* Creator Permission CTA in Hero */}
-            {user && canCreateCourse && (
+            {user && (
               <div className="pt-2 flex flex-wrap items-center gap-3">
                 <NavLink
-                  to="/studio/courses"
+                  to={canCreateCourse ? "/studio/courses" : "/studio"}
                   className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 via-indigo-500 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-xs shadow-lg shadow-indigo-600/30 hover:scale-105 active:scale-95 transition-all cursor-pointer"
                 >
                   <PlusCircle size={15} />
-                  <span>Create Course</span>
+                  <span>{canCreateCourse ? "Create Course" : "Create Course (Studio)"}</span>
                   <span className="px-1.5 py-0.5 text-[9px] font-black rounded-full bg-white/20 uppercase tracking-wider">
-                    Eligible
+                    {canCreateCourse ? "Eligible" : "Studio"}
                   </span>
                 </NavLink>
 
-                <NavLink
-                  to="/studio/dashboard"
-                  className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-slate-900/90 border border-emerald-500/40 hover:border-emerald-500 text-emerald-400 hover:text-emerald-300 font-bold text-xs transition-all shadow-sm"
-                >
-                  <LayoutDashboard size={14} />
-                  <span>Creator Studio</span>
-                </NavLink>
+                {canCreateCourse && (
+                  <NavLink
+                    to="/studio/dashboard"
+                    className="inline-flex items-center gap-1.5 px-4 py-2.5 rounded-xl bg-slate-900/90 border border-emerald-500/40 hover:border-emerald-500 text-emerald-400 hover:text-emerald-300 font-bold text-xs transition-all shadow-sm"
+                  >
+                    <LayoutDashboard size={14} />
+                    <span>Creator Studio</span>
+                  </NavLink>
+                )}
               </div>
             )}
           </motion.div>

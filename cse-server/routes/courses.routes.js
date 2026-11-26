@@ -607,9 +607,17 @@ const registerCoursesRoutes = (app, {
     const usedTopics = new Set(existingCourses.map((c) => c.topic));
     const eligibleTopics = allTopics.filter((t) => !usedTopics.has(t));
 
-    // Original Strict Business Logic: At least 1 completed mentoring session AND average rating >= 4.0
+    // Match studio eligibility criteria so Create Course stays consistent across Navbar, Marketplace, and Studio
     const meetsOriginalMentorshipCriteria = sessionCount >= 1 && averageRating >= 4.0;
-    const canCreateCourse = meetsOriginalMentorshipCriteria || userDoc?.role === "Admin";
+    const roleLower = String(userDoc?.role || "").toLowerCase();
+    const canCreateCourse = Boolean(
+      meetsOriginalMentorshipCriteria ||
+        roleLower === "admin" ||
+        roleLower === "instructor" ||
+        userDoc?.hasStudioAccess === true ||
+        userDoc?.canCreateCourse === true ||
+        existingCourses.length > 0
+    );
 
     return {
       averageRating,

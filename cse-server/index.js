@@ -30,6 +30,7 @@ const crypto = require("crypto");
 const { initIpBlocker, isIpBlocked } = require("./utils/ipBlocker");
 const { parseClientIp } = require("./utils/deviceParser");
 const { detectReviewFraud, sanitizeIp } = require("./utils/geoSecurity");
+const { escapeRegex, findUserByEmail } = require("./utils/userLookup");
 const { securityHeaders } = require("./middleware/securityHeaders");
 const { globalApiLimiter } = require("./middleware/rateLimiter");
 
@@ -564,31 +565,43 @@ async function run() {
     });
 
     const getParticipantsKey = (emailA, emailB) =>
-      [emailA, emailB].sort().join("__");
+      [String(emailA || "").trim().toLowerCase(), String(emailB || "").trim().toLowerCase()]
+        .sort()
+        .join("__");
 
     const isConnectedPair = async (emailA, emailB) => {
-      const user = await usersCollection.findOne(
-        { email: emailA },
-        { projection: { connections: 1 } },
+      const targetB = String(emailB || "").trim().toLowerCase();
+      if (!emailA || !targetB) return false;
+      const user = await findUserByEmail(usersCollection, emailA, {
+        projection: { connections: 1 },
+      });
+      return (user?.connections || []).some(
+        (c) => String(c?.email || "").trim().toLowerCase() === targetB
       );
-      return (user?.connections || []).some((c) => c.email === emailB);
     };
 
     const ensureConversationMembership = async (conversationId, email) => {
+      const cleanEmail = String(email || "").trim().toLowerCase();
+      if (!ObjectId.isValid(conversationId) || !cleanEmail) {
+        return { conversation: null, otherEmail: null };
+      }
       const conversation = await conversationsCollection.findOne(
         { _id: new ObjectId(conversationId) },
         { projection: { participants: 1, isGroup: 1, groupName: 1, groupTopic: 1, teamId: 1, leaderEmail: 1 } },
       );
       if (!conversation) return { conversation: null, otherEmail: null };
-      if (!conversation.participants.includes(email)) {
+      const participants = Array.isArray(conversation.participants) ? conversation.participants : [];
+      const isMember = participants.some((p) => String(p || "").trim().toLowerCase() === cleanEmail);
+      if (!isMember) {
         return { conversation: null, otherEmail: null };
       }
-      const otherEmail = conversation.participants.find((p) => p !== email);
+      const otherEmail = participants.find((p) => String(p || "").trim().toLowerCase() !== cleanEmail) || null;
       return { conversation, otherEmail };
     };
 
     const formatConversation = (conversation, peer, currentUserEmail) => {
       const isGroup = Boolean(conversation.isGroup);
+      const lowerViewer = String(currentUserEmail || "").trim().toLowerCase();
       return {
         _id: conversation._id.toString(),
         participants: conversation.participants,
@@ -612,7 +625,10 @@ async function run() {
             },
         lastMessage: conversation.lastMessage || null,
         lastMessageAt: conversation.lastMessageAt || conversation.createdAt,
-        unreadCount: conversation.unreadCounts?.[currentUserEmail] || 0,
+        unreadCount:
+          conversation.unreadCounts?.[currentUserEmail] ??
+          conversation.unreadCounts?.[lowerViewer] ??
+          0,
         createdAt: conversation.createdAt,
         updatedAt: conversation.updatedAt,
       };
@@ -1879,22 +1895,22 @@ async function run() {
 
       try {
         const [requesterUser, peerUser] = await Promise.all([
-          usersCollection.findOne({ email: requesterEmail }),
-          usersCollection.findOne({ email: peerEmail }),
+          findUserByEmail(usersCollection, requesterEmail),
+          findUserByEmail(usersCollection, peerEmail),
         ]);
         if (!requesterUser || !peerUser) {
           return res.status(404).send({ message: "User not found" });
         }
 
-        const connected = await isConnectedPair(requesterEmail, peerEmail);
+        const connected = await isConnectedPair(requesterUser.email, peerUser.email);
         if (!connected) {
           return res
             .status(403)
             .send({ message: "Only connected users can open conversation" });
         }
 
-        const participants = [requesterEmail, peerEmail].sort();
-        const participantsKey = getParticipantsKey(requesterEmail, peerEmail);
+        const participants = [requesterUser.email, peerUser.email].sort();
+        const participantsKey = getParticipantsKey(requesterUser.email, peerUser.email);
         const now = new Date().toISOString();
 
         await conversationsCollection.updateOne(
@@ -1906,8 +1922,8 @@ async function run() {
               createdAt: now,
               updatedAt: now,
               unreadCounts: {
-                [requesterEmail]: 0,
-                [peerEmail]: 0,
+                [requesterUser.email]: 0,
+                [peerUser.email]: 0,
               },
             },
           },
@@ -1918,7 +1934,7 @@ async function run() {
           participantsKey,
         });
 
-        return res.send(formatConversation(conversation, peerUser, requesterEmail));
+        return res.send(formatConversation(conversation, peerUser, requesterUser.email));
       } catch (error) {
         return res.status(500).send({ message: "Failed to open conversation" });
       }
@@ -1931,13 +1947,48 @@ async function run() {
       }
 
       const authEmail = (req.user?.email || "").toLowerCase().trim();
-      if (email.toLowerCase().trim() !== authEmail) {
+      const queryEmail = String(email).toLowerCase().trim();
+      if (queryEmail !== authEmail) {
         return res.status(403).send({ message: "Access denied. You can only view your own conversations." });
       }
 
       try {
+        const emailRegex = new RegExp(`^${escapeRegex(authEmail)}$`, "i");
+
+        // Ensure every accepted connection also has a conversation thread ready
+        const viewerDoc = await findUserByEmail(usersCollection, authEmail, {
+          projection: { email: 1, connections: 1 },
+        });
+        const viewerEmail = viewerDoc?.email || authEmail;
+        const connections = Array.isArray(viewerDoc?.connections) ? viewerDoc.connections : [];
+
+        if (connections.length > 0) {
+          const now = new Date().toISOString();
+          await Promise.all(
+            connections
+              .filter((c) => c?.email && c.email.toLowerCase().trim() !== authEmail)
+              .map((c) => {
+                const peerClean = String(c.email).trim();
+                const participantsKey = getParticipantsKey(viewerEmail, peerClean);
+                return conversationsCollection.updateOne(
+                  { participantsKey },
+                  {
+                    $setOnInsert: {
+                      participants: [viewerEmail, peerClean].sort(),
+                      participantsKey,
+                      createdAt: now,
+                      updatedAt: now,
+                      unreadCounts: { [viewerEmail]: 0, [peerClean]: 0 },
+                    },
+                  },
+                  { upsert: true }
+                );
+              })
+          );
+        }
+
         const conversations = await conversationsCollection
-          .find({ participants: email })
+          .find({ participants: { $regex: emailRegex } })
           .sort({ lastMessageAt: -1, updatedAt: -1 })
           .toArray();
 
@@ -1947,26 +1998,40 @@ async function run() {
 
         const peerEmails = [
           ...new Set(
-            conversations.map((c) => c.participants.find((p) => p !== email)),
+            conversations
+              .map((c) =>
+                (c.participants || []).find(
+                  (p) => String(p || "").trim().toLowerCase() !== authEmail
+                )
+              )
+              .filter(Boolean)
           ),
         ];
-        const peers = await usersCollection
-          .find(
-            { email: { $in: peerEmails } },
-            { projection: { email: 1, fullName: 1, name: 1, profileImage: 1 } },
-          )
-          .toArray();
-        const peerMap = new Map(peers.map((peer) => [peer.email, peer]));
+        const peerRegexList = peerEmails.map(
+          (pe) => new RegExp(`^${escapeRegex(String(pe).trim())}$`, "i")
+        );
+        const peers = peerRegexList.length
+          ? await usersCollection
+              .find(
+                { email: { $in: peerRegexList } },
+                { projection: { email: 1, fullName: 1, name: 1, profileImage: 1 } }
+              )
+              .toArray()
+          : [];
+        const peerMap = new Map(
+          peers.map((peer) => [String(peer.email || "").trim().toLowerCase(), peer])
+        );
 
         return res.send(
           conversations.map((conversation) => {
-            const peerEmail = conversation.participants.find((p) => p !== email);
-            return formatConversation(
-              conversation,
-              peerMap.get(peerEmail),
-              email,
+            const peerEmail = (conversation.participants || []).find(
+              (p) => String(p || "").trim().toLowerCase() !== authEmail
             );
-          }),
+            const peerDoc = peerEmail
+              ? peerMap.get(String(peerEmail).trim().toLowerCase()) || { email: peerEmail }
+              : null;
+            return formatConversation(conversation, peerDoc, viewerEmail);
+          })
         );
       } catch (error) {
         return res.status(500).send({ message: "Failed to fetch conversations" });
