@@ -64,14 +64,15 @@ const FindMentors = () => {
   const [hybridLoading, setHybridLoading] = useState(false);
   const [hybridResults, setHybridResults] = useState(null);
 
-  const handleRunHybridSearch = async (customQuery) => {
+  const handleRunHybridSearch = async (customQuery, customAlpha) => {
     const q = customQuery !== undefined ? customQuery : hybridQuery;
+    const activeAlpha = customAlpha !== undefined ? customAlpha : hybridAlpha;
     if (!q.trim() || !user) return;
 
     const payload = {
       query: q.trim(),
       email: user.email || "",
-      alpha: hybridAlpha,
+      alpha: activeAlpha,
       limit: 15,
     };
 
@@ -91,7 +92,11 @@ const FindMentors = () => {
       }
       const list = Array.isArray(res?.data) ? res.data : [];
       setHybridResults(list);
-      toast.success(`Hybrid retrieval matched ${list.length} mentors!`);
+      if (list.length > 0) {
+        toast.success(`Hybrid retrieval matched ${list.length} relevant mentor${list.length > 1 ? "s" : ""}!`);
+      } else {
+        toast.info("No relevant mentors matched your query.");
+      }
     } catch (err) {
       const msg = err?.response?.data?.message || "Hybrid vector search failed.";
       toast.error(msg);
@@ -212,7 +217,7 @@ const FindMentors = () => {
       const matchB = typeof b.matchPercentage === "number" ? b.matchPercentage : 85;
       return matchB - matchA;
     });
-  }, [mentors, searchTerm, selectedLevel, sortBy]);
+  }, [mentors, searchTerm, selectedLevel, sortBy, searchMode, hybridResults]);
 
   return (
     <div className="min-h-screen py-10 px-4 sm:px-6 lg:px-8 relative overflow-hidden bg-transparent text-slate-100 font-sans selection:bg-indigo-500/30">
@@ -385,7 +390,12 @@ const FindMentors = () => {
                   ].map((preset) => (
                     <button
                       key={preset.label}
-                      onClick={() => setHybridAlpha(preset.alpha)}
+                      onClick={() => {
+                        setHybridAlpha(preset.alpha);
+                        if (hybridResults !== null && hybridQuery.trim()) {
+                          handleRunHybridSearch(hybridQuery, preset.alpha);
+                        }
+                      }}
                       className={`text-[10px] px-2 py-0.5 rounded-lg border font-semibold transition ${
                         hybridAlpha === preset.alpha
                           ? "bg-purple-600/30 border-purple-500 text-purple-200"
@@ -547,14 +557,16 @@ const FindMentors = () => {
             <span>
               Showing {processedMentors.length} of {mentors.length} Verified Mentors
             </span>
-            {searchTerm && (
+            {(searchMode === "hybrid" && hybridResults !== null ? hybridQuery.trim() : searchTerm) && (
               <span className="text-indigo-400 font-mono text-[11px]">
-                matching "{searchTerm}"
+                matching "{searchMode === "hybrid" && hybridResults !== null ? hybridQuery.trim() : searchTerm}"
               </span>
             )}
           </div>
           <span className="text-[11px] font-semibold text-slate-400 hidden sm:inline">
-            Intelligent Skill Complementarity Active
+            {searchMode === "hybrid" && hybridResults !== null
+              ? "Hybrid Vector + BM25 Ranking Active"
+              : "Intelligent Skill Complementarity Active"}
           </span>
         </div>
 
@@ -599,6 +611,8 @@ const FindMentors = () => {
                     setSearchTerm("");
                     setSelectedLevel("all");
                     setSortBy("match");
+                    setHybridResults(null);
+                    setHybridQuery("");
                   }}
                   className="inline-flex items-center gap-2 px-6 py-3 rounded-xl bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold text-xs transition-all shadow-md shadow-indigo-600/30"
                 >

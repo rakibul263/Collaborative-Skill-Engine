@@ -13,12 +13,36 @@
  */
 
 // ─── OKAPI BM25 KEYWORD SEARCH ENGINE ───
-const tokenize = (text = "") => {
-  return String(text || "")
+const STOPWORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "build", "building", "by", "can",
+  "do", "for", "from", "get", "have", "help", "how", "i", "in", "into", "is",
+  "it", "learn", "learning", "like", "looking", "make", "me", "mentor", "mentors",
+  "model", "models", "my", "need", "of", "on", "or", "our", "project", "projects",
+  "seek", "seeking", "skill", "skills", "some", "someone", "teach", "teaches",
+  "teaching", "that", "the", "their", "them", "this", "to", "use", "using",
+  "want", "with", "work", "working", "would", "you", "your",
+]);
+
+const tokenize = (text = "", { removeStopwords = true } = {}) => {
+  const rawTokens = String(text || "")
     .toLowerCase()
-    .replace(/[^a-z0-9\s.#+-]/g, " ")
-    .split(/\s+/)
-    .filter((t) => t.length > 1 || t === "c" || t === "r");
+    .replace(/[^a-z0-9\s.#+/-]/g, " ")
+    .split(/[\s/]+/)
+    .flatMap((tok) => {
+      if (!tok) return [];
+      const parts = [tok];
+      // Also index base token for Node.js -> node, React.js -> react
+      if (tok.endsWith(".js") && tok.length > 3) {
+        parts.push(tok.slice(0, -3));
+      }
+      return parts;
+    });
+
+  return rawTokens.filter((t) => {
+    if (!(t.length > 1 || t === "c" || t === "r")) return false;
+    if (removeStopwords && STOPWORDS.has(t)) return false;
+    return true;
+  });
 };
 
 class OkapiBM25 {
@@ -120,22 +144,22 @@ const fnv1aHash = (str = "") => {
 };
 
 // Pure JavaScript Deterministic Sub-Word Hashing Dense Vectorizer (Resilient Fallback)
-const generateLocalDenseEmbedding = (text = "", dims = 128) => {
+const generateLocalDenseEmbedding = (text = "", dims = 512) => {
   const vector = new Array(dims).fill(0);
   const tokens = tokenize(text);
 
   tokens.forEach((token) => {
     // Whole-token feature (position-independent so query and profile align reliably)
     const wholeIdx = fnv1aHash(`w:${token}`) % dims;
-    vector[wholeIdx] += 1.6;
+    vector[wholeIdx] += 2.0;
 
     // Character bi-grams & tri-grams for partial/morphological skill overlap
     for (let i = 0; i < token.length - 1; i++) {
       const biIdx = fnv1aHash(`b:${token.slice(i, i + 2)}`) % dims;
-      vector[biIdx] += 0.7 / (1 + Math.log(token.length));
+      vector[biIdx] += 0.5 / (1 + Math.log(token.length));
       if (i < token.length - 2) {
         const triIdx = fnv1aHash(`t:${token.slice(i, i + 3)}`) % dims;
-        vector[triIdx] += 0.9 / (1 + Math.log(token.length));
+        vector[triIdx] += 0.85 / (1 + Math.log(token.length));
       }
     }
   });
@@ -182,21 +206,24 @@ const getRemoteModelCandidates = () => {
 };
 
 /**
- * Gets embeddings provider for a specific Google model name
+ * Gets embeddings provider for a specific Google model name & taskType
  */
-const createEmbeddingsInstance = (modelName) => {
+const createEmbeddingsInstance = (modelName, taskType) => {
   if (!process.env.GOOGLE_API_KEY || !modelName) return null;
   try {
     const { GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai");
     return new GoogleGenerativeAIEmbeddings({
       model: modelName,
       apiKey: process.env.GOOGLE_API_KEY,
+      ...(taskType ? { taskType } : {}),
     });
   } catch (err) {
     console.warn("[Hybrid Retrieval] Google Generative AI Embeddings init failed:", err.message);
     return null;
   }
 };
+
+const clamp01 = (v) => Math.max(0, Math.min(1, v));
 
 /**
  * Main Hybrid Mentor Retrieval Engine
@@ -212,29 +239,40 @@ const retrieveHybridRecommendedMentors = async ({
     return mentors.slice(0, limit);
   }
 
-  // 1. Prepare mentor document representations
+  // 1. Prepare mentor document representations (focused on TEACHING expertise, not what they want to learn)
   const mentorDocs = mentors.map((m) => {
-    const teachSkillsText = toSkillArray(m.teachSkills).join(", ");
-    const learnSkillsText = toSkillArray(m.learnSkills).join(", ");
+    const teachSkillsList = toSkillArray(m.teachSkills);
+    const teachSkillsText = teachSkillsList.join(", ");
+    // Clean searchable text without boilerplate words ("Teaches:", "Interested in:", "Level:")
     const fullText = [
       m.fullName || "",
       m.headline || "",
+      teachSkillsText,
       m.bio || "",
-      teachSkillsText ? `Teaches: ${teachSkillsText}` : "",
-      learnSkillsText ? `Interested in: ${learnSkillsText}` : "",
-      m.teachLevel ? `Level: ${m.teachLevel}` : "",
       m.education || "",
+      m.teachLevel || "",
     ]
       .filter(Boolean)
       .join(" — ");
 
+    const searchableLower = [
+      m.fullName || "",
+      m.headline || "",
+      teachSkillsText,
+      m.bio || "",
+    ]
+      .join(" ")
+      .toLowerCase();
+
     return {
       mentor: m,
       text: fullText,
+      searchableLower,
+      teachSkillsLower: teachSkillsList.map((s) => s.toLowerCase()),
     };
   });
 
-  // 2. Compute BM25 Sparse Keyword Scores
+  // 2. Compute BM25 Sparse Keyword Scores (stopword-free)
   const bm25Engine = new OkapiBM25(mentorDocs);
   const rawBm25Scores = bm25Engine.scoreQuery(cleanQuery);
 
@@ -243,7 +281,8 @@ const retrieveHybridRecommendedMentors = async ({
     maxBm25 > 0 ? rawBm25Scores.map((score) => score / maxBm25) : rawBm25Scores.map(() => 0);
 
   // 3. Compute Bi-Encoder Dense Semantic Vector Scores
-  let denseSimilarities = [];
+  let rawDenseSimilarities = [];
+  let usedRemoteEmbeddings = false;
   const modelCandidates = getRemoteModelCandidates();
 
   if (modelCandidates.length > 0) {
@@ -251,14 +290,15 @@ const retrieveHybridRecommendedMentors = async ({
     let lastErrMsg = "";
 
     for (const modelName of modelCandidates) {
-      const embeddingsInstance = createEmbeddingsInstance(modelName);
-      if (!embeddingsInstance) continue;
+      const queryEmbeddings = createEmbeddingsInstance(modelName, "RETRIEVAL_QUERY");
+      const docEmbeddings = createEmbeddingsInstance(modelName, "RETRIEVAL_DOCUMENT");
+      if (!queryEmbeddings || !docEmbeddings) continue;
 
       try {
         const [queryVector, docVectors] = await withTimeout(
           Promise.all([
-            embeddingsInstance.embedQuery(cleanQuery),
-            embeddingsInstance.embedDocuments(docTexts),
+            queryEmbeddings.embedQuery(cleanQuery),
+            docEmbeddings.embedDocuments(docTexts),
           ]),
           9000,
           `Google hybrid embeddings (${modelName})`
@@ -273,16 +313,16 @@ const retrieveHybridRecommendedMentors = async ({
           throw new Error("Empty or mismatched embedding vectors returned by remote provider");
         }
 
-        denseSimilarities = docVectors.map((docVec) =>
+        rawDenseSimilarities = docVectors.map((docVec) =>
           isValidEmbeddingVector(docVec) && docVec.length === queryVector.length
             ? Math.max(0, cosineSimilarity(queryVector, docVec))
             : 0
         );
         activeRemoteEmbeddingModel = modelName;
+        usedRemoteEmbeddings = true;
         break;
       } catch (err) {
         lastErrMsg = String(err?.message || "");
-        // Auth/permission failures apply to the API key itself — skip remaining remote models
         if (
           lastErrMsg.includes("403") ||
           lastErrMsg.includes("401") ||
@@ -295,7 +335,7 @@ const retrieveHybridRecommendedMentors = async ({
       }
     }
 
-    if (denseSimilarities.length === 0 && lastErrMsg) {
+    if (rawDenseSimilarities.length === 0 && lastErrMsg) {
       if (
         lastErrMsg.includes("404") ||
         lastErrMsg.includes("400") ||
@@ -308,57 +348,94 @@ const retrieveHybridRecommendedMentors = async ({
   }
 
   // Fallback to local dense vectorizer if Google embeddings unavailable or failed
-  if (denseSimilarities.length === 0) {
+  if (rawDenseSimilarities.length === 0) {
     const queryVec = generateLocalDenseEmbedding(cleanQuery);
-    denseSimilarities = mentorDocs.map((doc) => {
+    rawDenseSimilarities = mentorDocs.map((doc) => {
       const docVec = generateLocalDenseEmbedding(doc.text);
       return Math.max(0, cosineSimilarity(queryVec, docVec));
     });
   }
 
-  // 4. Reciprocal Rank Fusion & Hybrid Composite Score
-  const queryTokens = tokenize(cleanQuery);
+  // 4. Relevance Filtering, Calibrated Scoring & Reciprocal Fusion
+  // Fall back to unfiltered tokens only if the entire query consisted of generic words
+  let queryTokens = tokenize(cleanQuery, { removeStopwords: true });
+  if (queryTokens.length === 0) {
+    queryTokens = tokenize(cleanQuery, { removeStopwords: false });
+  }
 
-  const scoredResults = mentorDocs.map((doc, idx) => {
-    const denseScore = denseSimilarities[idx] || 0;
+  const scoredResults = [];
+
+  mentorDocs.forEach((doc, idx) => {
+    const rawDense = rawDenseSimilarities[idx] || 0;
+    const rawBm25 = rawBm25Scores[idx] || 0;
     const bm25Score = normalizedBm25Scores[idx] || 0;
 
-    // Linear combination score
-    const hybridScore = alpha * denseScore + (1 - alpha) * bm25Score;
-
-    // Identify matched concept highlights
-    const matchedTokens = queryTokens.filter((token) =>
-      doc.text.toLowerCase().includes(token)
+    // Identify meaningful matched tokens in the mentor's teaching skills, headline, or bio
+    const matchedTokens = Array.from(
+      new Set(
+        queryTokens.filter((token) => {
+          if (doc.teachSkillsLower.some((sk) => sk === token || sk.includes(token))) {
+            return true;
+          }
+          if (token.length >= 2 && doc.searchableLower.includes(token)) {
+            return true;
+          }
+          return false;
+        })
+      )
     );
+
+    const hasKeywordMatch = rawBm25 > 0 || matchedTokens.length > 0;
+
+    // Calibrate cosine score: Gemini RETRIEVAL embeddings have ~0.55 noise floor on unrelated English text
+    const denseScore = usedRemoteEmbeddings
+      ? clamp01((rawDense - 0.54) / (0.82 - 0.54))
+      : clamp01(rawDense);
+
+    // Relevance gate: reject unrelated mentors instead of returning everyone in the database
+    const isRelevant = usedRemoteEmbeddings
+      ? (hasKeywordMatch && rawDense >= 0.55) || rawDense >= 0.618
+      : hasKeywordMatch || rawDense >= 0.35;
+
+    if (!isRelevant) return;
+
+    // Linear combination score (preserve meaningful semantic score for pure conceptual queries)
+    let hybridScore = alpha * denseScore + (1 - alpha) * bm25Score;
+    if (maxBm25 === 0 && denseScore > 0) {
+      hybridScore = Math.max(hybridScore, denseScore * 0.85);
+    }
 
     // Dynamic explainability reasoning
     let matchReason = "";
-    if (denseScore > 0.75 && bm25Score > 0.6) {
+    if (denseScore >= 0.55 && bm25Score >= 0.5) {
       matchReason = "Strong semantic alignment with exact technology overlap";
-    } else if (denseScore > 0.7) {
+    } else if (bm25Score >= 0.4 || matchedTokens.length > 0) {
+      matchReason = "Direct keyword & skill overlap in mentor profile";
+    } else if (denseScore >= 0.3) {
       matchReason = "High conceptual domain match with your learning target";
-    } else if (bm25Score > 0.6) {
-      matchReason = "Direct keyword overlap in mentor skills and bio";
     } else {
       matchReason = "Relevant background matching parts of your learning inquiry";
     }
 
-    return {
+    scoredResults.push({
       ...doc.mentor,
       hybridMetrics: {
         hybridScore: Math.round(hybridScore * 100),
         denseScore: Math.round(denseScore * 100),
         bm25Score: Math.round(bm25Score * 100),
-        matchedTokens: Array.from(new Set(matchedTokens)),
+        matchedTokens,
         matchReason,
       },
-    };
+    });
   });
 
-  // Sort descending by Hybrid Score
-  scoredResults.sort(
-    (a, b) => b.hybridMetrics.hybridScore - a.hybridMetrics.hybridScore
-  );
+  // Sort descending by Hybrid Score (tie-break by keyword overlap then dense score)
+  scoredResults.sort((a, b) => {
+    if (b.hybridMetrics.hybridScore !== a.hybridMetrics.hybridScore) {
+      return b.hybridMetrics.hybridScore - a.hybridMetrics.hybridScore;
+    }
+    return b.hybridMetrics.bm25Score - a.hybridMetrics.bm25Score;
+  });
 
   return scoredResults.slice(0, limit);
 };
