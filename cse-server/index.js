@@ -436,7 +436,11 @@ async function run() {
       userNotificationsCollection,
       io,
     });
-    registerHybridMentorRoutes(app, { usersCollection, ratingsCollection });
+    registerHybridMentorRoutes(app, {
+      usersCollection,
+      ratingsCollection,
+      connectionRequestsCollection,
+    });
     registerCodeExecutionRoutes(app);
     registerPaymentRoutes(app, {
       coursesCollection,

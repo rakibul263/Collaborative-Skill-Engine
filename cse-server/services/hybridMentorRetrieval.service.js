@@ -14,11 +14,11 @@
 
 // ─── OKAPI BM25 KEYWORD SEARCH ENGINE ───
 const tokenize = (text = "") => {
-  return text
+  return String(text || "")
     .toLowerCase()
-    .replace(/[^a-z0-9\s\.\#\+\-]/g, " ")
+    .replace(/[^a-z0-9\s.#+-]/g, " ")
     .split(/\s+/)
-    .filter((t) => t.length > 1);
+    .filter((t) => t.length > 1 || t === "c" || t === "r");
 };
 
 class OkapiBM25 {
@@ -109,18 +109,34 @@ const cosineSimilarity = (vecA, vecB) => {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 };
 
-// Pure JavaScript Deterministic Hashing Dense Vectorizer (Resilient Fallback)
+// FNV-1a 32-bit hash for position-independent sub-word & token projection
+const fnv1aHash = (str = "") => {
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return hash >>> 0;
+};
+
+// Pure JavaScript Deterministic Sub-Word Hashing Dense Vectorizer (Resilient Fallback)
 const generateLocalDenseEmbedding = (text = "", dims = 128) => {
   const vector = new Array(dims).fill(0);
   const tokens = tokenize(text);
 
-  tokens.forEach((token, tIdx) => {
-    // Generate bi-grams & subwords
+  tokens.forEach((token) => {
+    // Whole-token feature (position-independent so query and profile align reliably)
+    const wholeIdx = fnv1aHash(`w:${token}`) % dims;
+    vector[wholeIdx] += 1.6;
+
+    // Character bi-grams & tri-grams for partial/morphological skill overlap
     for (let i = 0; i < token.length - 1; i++) {
-      const charCode1 = token.charCodeAt(i);
-      const charCode2 = token.charCodeAt(i + 1);
-      const hash = (charCode1 * 31 + charCode2 * 17 + tIdx) % dims;
-      vector[hash] += 1.0 / (1 + Math.log(token.length));
+      const biIdx = fnv1aHash(`b:${token.slice(i, i + 2)}`) % dims;
+      vector[biIdx] += 0.7 / (1 + Math.log(token.length));
+      if (i < token.length - 2) {
+        const triIdx = fnv1aHash(`t:${token.slice(i, i + 3)}`) % dims;
+        vector[triIdx] += 0.9 / (1 + Math.log(token.length));
+      }
     }
   });
 
@@ -129,22 +145,57 @@ const generateLocalDenseEmbedding = (text = "", dims = 128) => {
   return norm > 0 ? vector.map((v) => v / norm) : vector;
 };
 
-/**
- * Gets embeddings provider (Google text-embedding-004 or local fallback)
- */
-const getEmbeddingsInstance = () => {
-  if (process.env.GOOGLE_API_KEY) {
-    try {
-      const { GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai");
-      return new GoogleGenerativeAIEmbeddings({
-        model: process.env.GEMINI_EMBEDDING_MODEL || "text-embedding-004",
-        apiKey: process.env.GOOGLE_API_KEY,
-      });
-    } catch (err) {
-      console.warn("[Hybrid Retrieval] Google Generative AI Embeddings init failed:", err.message);
-    }
+let remoteEmbeddingsDisabled = false;
+let activeRemoteEmbeddingModel = null;
+
+const withTimeout = (promise, ms, label) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+
+const isValidEmbeddingVector = (vec) =>
+  Array.isArray(vec) && vec.length > 0 && vec.some((v) => Number.isFinite(v) && v !== 0);
+
+const toSkillArray = (skills) => {
+  if (Array.isArray(skills)) {
+    return skills.map((s) => String(s || "").trim()).filter(Boolean);
   }
-  return null;
+  if (typeof skills === "string") {
+    return skills
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return [];
+};
+
+const getRemoteModelCandidates = () => {
+  if (remoteEmbeddingsDisabled || !process.env.GOOGLE_API_KEY) return [];
+  if (activeRemoteEmbeddingModel) return [activeRemoteEmbeddingModel];
+  const configured = String(process.env.GEMINI_EMBEDDING_MODEL || "").trim();
+  // text-embedding-004 was deprecated on Gemini v1beta; fall back to gemini-embedding-001 automatically
+  const list = [configured, "gemini-embedding-001"].filter(Boolean);
+  return Array.from(new Set(list));
+};
+
+/**
+ * Gets embeddings provider for a specific Google model name
+ */
+const createEmbeddingsInstance = (modelName) => {
+  if (!process.env.GOOGLE_API_KEY || !modelName) return null;
+  try {
+    const { GoogleGenerativeAIEmbeddings } = require("@langchain/google-genai");
+    return new GoogleGenerativeAIEmbeddings({
+      model: modelName,
+      apiKey: process.env.GOOGLE_API_KEY,
+    });
+  } catch (err) {
+    console.warn("[Hybrid Retrieval] Google Generative AI Embeddings init failed:", err.message);
+    return null;
+  }
 };
 
 /**
@@ -156,14 +207,15 @@ const retrieveHybridRecommendedMentors = async ({
   alpha = 0.65, // Dense vs Sparse weighting: 0.65 dense semantic + 0.35 keyword
   limit = 8,
 }) => {
-  if (!query || mentors.length === 0) {
+  const cleanQuery = String(query || "").trim();
+  if (!cleanQuery || mentors.length === 0) {
     return mentors.slice(0, limit);
   }
 
   // 1. Prepare mentor document representations
   const mentorDocs = mentors.map((m) => {
-    const teachSkillsText = (m.teachSkills || []).join(", ");
-    const learnSkillsText = (m.learnSkills || []).join(", ");
+    const teachSkillsText = toSkillArray(m.teachSkills).join(", ");
+    const learnSkillsText = toSkillArray(m.learnSkills).join(", ");
     const fullText = [
       m.fullName || "",
       m.headline || "",
@@ -184,36 +236,80 @@ const retrieveHybridRecommendedMentors = async ({
 
   // 2. Compute BM25 Sparse Keyword Scores
   const bm25Engine = new OkapiBM25(mentorDocs);
-  const rawBm25Scores = bm25Engine.scoreQuery(query);
+  const rawBm25Scores = bm25Engine.scoreQuery(cleanQuery);
 
-  const maxBm25 = Math.max(...rawBm25Scores, 0.001);
-  const normalizedBm25Scores = rawBm25Scores.map((score) => score / maxBm25);
+  const maxBm25 = Math.max(...rawBm25Scores, 0);
+  const normalizedBm25Scores =
+    maxBm25 > 0 ? rawBm25Scores.map((score) => score / maxBm25) : rawBm25Scores.map(() => 0);
 
   // 3. Compute Bi-Encoder Dense Semantic Vector Scores
   let denseSimilarities = [];
-  const embeddingsInstance = getEmbeddingsInstance();
+  const modelCandidates = getRemoteModelCandidates();
 
-  if (embeddingsInstance) {
-    try {
-      const docTexts = mentorDocs.map((d) => d.text);
-      // Generate query embedding & document embeddings
-      const [queryVector, docVectors] = await Promise.all([
-        embeddingsInstance.embedQuery(query),
-        embeddingsInstance.embedDocuments(docTexts),
-      ]);
+  if (modelCandidates.length > 0) {
+    const docTexts = mentorDocs.map((d) => d.text || d.mentor?.fullName || "Mentor");
+    let lastErrMsg = "";
 
-      denseSimilarities = docVectors.map((docVec) =>
-        Math.max(0, cosineSimilarity(queryVector, docVec))
-      );
-    } catch (err) {
-      console.warn("[Hybrid Retrieval] Fallback to local dense vectorizer due to:", err.message);
-      embeddingsInstance = null; // Trigger fallback
+    for (const modelName of modelCandidates) {
+      const embeddingsInstance = createEmbeddingsInstance(modelName);
+      if (!embeddingsInstance) continue;
+
+      try {
+        const [queryVector, docVectors] = await withTimeout(
+          Promise.all([
+            embeddingsInstance.embedQuery(cleanQuery),
+            embeddingsInstance.embedDocuments(docTexts),
+          ]),
+          9000,
+          `Google hybrid embeddings (${modelName})`
+        );
+
+        if (
+          !isValidEmbeddingVector(queryVector) ||
+          !Array.isArray(docVectors) ||
+          docVectors.length !== mentorDocs.length ||
+          !docVectors.some((dv) => isValidEmbeddingVector(dv) && dv.length === queryVector.length)
+        ) {
+          throw new Error("Empty or mismatched embedding vectors returned by remote provider");
+        }
+
+        denseSimilarities = docVectors.map((docVec) =>
+          isValidEmbeddingVector(docVec) && docVec.length === queryVector.length
+            ? Math.max(0, cosineSimilarity(queryVector, docVec))
+            : 0
+        );
+        activeRemoteEmbeddingModel = modelName;
+        break;
+      } catch (err) {
+        lastErrMsg = String(err?.message || "");
+        // Auth/permission failures apply to the API key itself — skip remaining remote models
+        if (
+          lastErrMsg.includes("403") ||
+          lastErrMsg.includes("401") ||
+          lastErrMsg.includes("API key") ||
+          lastErrMsg.includes("PERMISSION_DENIED")
+        ) {
+          remoteEmbeddingsDisabled = true;
+          break;
+        }
+      }
+    }
+
+    if (denseSimilarities.length === 0 && lastErrMsg) {
+      if (
+        lastErrMsg.includes("404") ||
+        lastErrMsg.includes("400") ||
+        lastErrMsg.includes("not found")
+      ) {
+        remoteEmbeddingsDisabled = true;
+      }
+      console.warn("[Hybrid Retrieval] Fallback to local dense vectorizer due to:", lastErrMsg);
     }
   }
 
   // Fallback to local dense vectorizer if Google embeddings unavailable or failed
   if (denseSimilarities.length === 0) {
-    const queryVec = generateLocalDenseEmbedding(query);
+    const queryVec = generateLocalDenseEmbedding(cleanQuery);
     denseSimilarities = mentorDocs.map((doc) => {
       const docVec = generateLocalDenseEmbedding(doc.text);
       return Math.max(0, cosineSimilarity(queryVec, docVec));
@@ -221,7 +317,7 @@ const retrieveHybridRecommendedMentors = async ({
   }
 
   // 4. Reciprocal Rank Fusion & Hybrid Composite Score
-  const queryTokens = tokenize(query);
+  const queryTokens = tokenize(cleanQuery);
 
   const scoredResults = mentorDocs.map((doc, idx) => {
     const denseScore = denseSimilarities[idx] || 0;

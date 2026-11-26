@@ -66,20 +66,35 @@ const FindMentors = () => {
 
   const handleRunHybridSearch = async (customQuery) => {
     const q = customQuery !== undefined ? customQuery : hybridQuery;
-    if (!q.trim() || !user?.email) return;
+    if (!q.trim() || !user) return;
+
+    const payload = {
+      query: q.trim(),
+      email: user.email || "",
+      alpha: hybridAlpha,
+      limit: 15,
+    };
 
     try {
       setHybridLoading(true);
-      const res = await apiClient.post("/api/mentors/hybrid-recommend", {
-        query: q.trim(),
-        email: user.email,
-        alpha: hybridAlpha,
-        limit: 15,
-      });
-      setHybridResults(res.data || []);
-      toast.success(`Hybrid retrieval matched ${res.data?.length || 0} mentors!`);
-    } catch {
-      toast.error("Hybrid vector search failed.");
+      let res;
+      try {
+        res = await apiClient.post("/api/mentors/hybrid-recommend", payload, { timeout: 45000 });
+      } catch (firstErr) {
+        const st = firstErr?.response?.status;
+        if (!firstErr?.response || st === 502 || st === 503 || st === 504) {
+          await new Promise((r) => setTimeout(r, 2000));
+          res = await apiClient.post("/api/mentors/hybrid-recommend", payload, { timeout: 45000 });
+        } else {
+          throw firstErr;
+        }
+      }
+      const list = Array.isArray(res?.data) ? res.data : [];
+      setHybridResults(list);
+      toast.success(`Hybrid retrieval matched ${list.length} mentors!`);
+    } catch (err) {
+      const msg = err?.response?.data?.message || "Hybrid vector search failed.";
+      toast.error(msg);
     } finally {
       setHybridLoading(false);
     }
