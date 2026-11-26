@@ -20,6 +20,7 @@ import { useOutletContext, Link, useSearchParams } from "react-router-dom";
 import { toast } from "@/components/ui/toast-system";
 import { showConfirm } from "@/components/ui/confirm-dialog";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import LessonEditorModal from "@/components/studio/LessonEditorModal";
 import YouTubeVideoUploadModal from "@/components/studio/YouTubeVideoUploadModal";
 import LessonPreviewModal from "@/components/studio/LessonPreviewModal";
@@ -32,7 +33,16 @@ const StudioLessonsPage = () => {
   const queryCourseId = searchParams.get("courseId");
 
   const [manualCourseId, setManualCourseId] = useState(queryCourseId || "");
-  const [lessons, setLessons] = useState([]);
+  const selectedCourseId =
+    queryCourseId && courses.some((c) => c._id === queryCourseId)
+      ? queryCourseId
+      : manualCourseId && courses.some((c) => c._id === manualCourseId)
+      ? manualCourseId
+      : courses[0]?._id || "";
+
+  const [lessons, setLessons] = useState(
+    () => (selectedCourseId ? getCachedData(`/courses/${selectedCourseId}/lessons`) : null) || []
+  );
   const [loading, setLoading] = useState(false);
 
   const [showModal, setShowModal] = useState(false);
@@ -41,30 +51,27 @@ const StudioLessonsPage = () => {
   const [videoUploadLesson, setVideoUploadLesson] = useState(null);
   const [previewLesson, setPreviewLesson] = useState(null);
 
-  const selectedCourseId =
-    queryCourseId && courses.some((c) => c._id === queryCourseId)
-      ? queryCourseId
-      : manualCourseId && courses.some((c) => c._id === manualCourseId)
-      ? manualCourseId
-      : courses[0]?._id || "";
-
   const handleSelectCourse = (courseId) => {
     setManualCourseId(courseId);
     setPreviewLesson(null);
+    const cached = getCachedData(`/courses/${courseId}/lessons`);
+    if (Array.isArray(cached)) setLessons(cached);
     setSearchParams({ courseId }, { replace: true });
   };
 
   const fetchLessons = useCallback(
-    async (targetId) => {
+    async (targetId, forceRefresh = false) => {
       const idToLoad = targetId || selectedCourseId;
       if (!idToLoad) return;
-      setLoading(true);
+      const url = `/courses/${idToLoad}/lessons`;
+      const cached = getCachedData(url);
+      if (!cached && !forceRefresh) setLoading(true);
       try {
-        const res = await apiClient.get(`/courses/${idToLoad}/lessons`);
+        const res = await apiClient.get(url, { forceRefresh });
         setLessons(res.data || []);
       } catch (err) {
         console.error("Fetch lessons error:", err);
-        toast.error("Could not load lessons for selected course.");
+        if (!cached) toast.error("Could not load lessons for selected course.");
       } finally {
         setLoading(false);
       }

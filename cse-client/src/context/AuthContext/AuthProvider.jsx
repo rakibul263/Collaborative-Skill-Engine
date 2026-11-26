@@ -17,8 +17,50 @@ import apiClient, { exchangeToken } from "@/lib/apiClient";
 import axios from "axios";
 import { withCacheBust } from "@/lib/profileApi";
 import { calculateProfileCompletion } from "@/lib/profileCompletion";
+import {
+  clearAllFastCache,
+  invalidateCachePrefixes,
+  setCachedData,
+  setFastCacheUserScope,
+} from "@/lib/fastCache";
+import { prefetchAuthenticatedBaseline } from "@/lib/prefetchManager";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
+
+const getProfileCacheKey = (email) =>
+  email ? `cse_user_profile_${String(email).toLowerCase().trim()}` : "";
+
+const readCachedMongoUser = (email) => {
+  const key = getProfileCacheKey(email);
+  if (!key || typeof window === "undefined") return null;
+  try {
+    const raw = localStorage.getItem(key);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
+  }
+};
+
+const writeCachedMongoUser = (email, data) => {
+  const key = getProfileCacheKey(email);
+  if (!key || !data || typeof window === "undefined") return;
+  try {
+    const { certificates, projects, ...light } = data;
+    const compact = {
+      ...light,
+      projects: Array.isArray(projects) ? projects.slice(0, 12) : [],
+      certificates: Array.isArray(certificates)
+        ? certificates.map(({ fileUrl: _ignore, ...c }) => c).slice(0, 12)
+        : [],
+    };
+    const serialized = JSON.stringify(compact);
+    if (serialized.length < 100_000) {
+      localStorage.setItem(key, serialized);
+    }
+  } catch {
+    // ignore storage quota errors
+  }
+};
 
 const buildMergedUser = (firebaseUser, mongoUser = null) => {
   if (!firebaseUser) return null;
@@ -188,6 +230,8 @@ const AuthProvider = ({ children } = {}) => {
     }
     socket.disconnect();
     clearJWT(); // Clear JWT so next user gets a fresh token
+    setFastCacheUserScope("");
+    clearAllFastCache();
     setLoading(true);
     if (!auth) {
       setUser(null);
@@ -280,6 +324,11 @@ const AuthProvider = ({ children } = {}) => {
     let heartbeatInterval = null;
     let onConnectHandler = null;
     let visibilityHandler = null;
+    let onConnectionsInv = null;
+    let onConversationsInv = null;
+    let onMessageInv = null;
+    let onTeamsInv = null;
+    let onAppealsInv = null;
 
     const unSubscribe = onAuthStateChanged(auth, async (currentUser) => {
       const socket = getSocket();
@@ -287,14 +336,30 @@ const AuthProvider = ({ children } = {}) => {
       if (heartbeatInterval) clearInterval(heartbeatInterval);
       if (onConnectHandler) socket.off("connect", onConnectHandler);
       if (visibilityHandler) document.removeEventListener("visibilitychange", visibilityHandler);
+      if (onConnectionsInv) socket.off("connections:updated", onConnectionsInv);
+      if (onConversationsInv) socket.off("conversation:updated", onConversationsInv);
+      if (onMessageInv) socket.off("message:new", onMessageInv);
+      if (onTeamsInv) {
+        socket.off("team:updated", onTeamsInv);
+        socket.off("team:deleted", onTeamsInv);
+        socket.off("team:member_removed", onTeamsInv);
+      }
+      if (onAppealsInv) {
+        socket.off("appeal:new", onAppealsInv);
+        socket.off("appeal:updated", onAppealsInv);
+        socket.off("enrollment:updated", onAppealsInv);
+      }
 
       if (!currentUser) {
+        setFastCacheUserScope("");
+        clearAllFastCache();
         setUser(null);
         socket.emit("presence:leave", {});
         socket.disconnect();
         clearJWT();
         setLoading(false);
       } else {
+        setFastCacheUserScope(currentUser.email || "");
         // Keep existing valid JWT for the same user so protected calls don't stall on reload
         const existingToken = getJWT();
         let keepToken = false;
@@ -317,6 +382,28 @@ const AuthProvider = ({ children } = {}) => {
           void exchangeToken();
         }
         if (!socket.connected) socket.connect();
+
+        onConnectionsInv = () =>
+          invalidateCachePrefixes(["/connections", "/find-mentors", "/conversations", "/experts"]);
+        onConversationsInv = () => invalidateCachePrefixes(["/conversations"]);
+        onMessageInv = (msg) => {
+          invalidateCachePrefixes(["/conversations"]);
+          if (msg?.conversationId) {
+            invalidateCachePrefixes([`/conversations/${msg.conversationId}/messages`]);
+          }
+        };
+        onTeamsInv = () => invalidateCachePrefixes(["/api/teams", "/conversations"]);
+        onAppealsInv = () => invalidateCachePrefixes(["/studio", "/courses"]);
+
+        socket.on("connections:updated", onConnectionsInv);
+        socket.on("conversation:updated", onConversationsInv);
+        socket.on("message:new", onMessageInv);
+        socket.on("team:updated", onTeamsInv);
+        socket.on("team:deleted", onTeamsInv);
+        socket.on("team:member_removed", onTeamsInv);
+        socket.on("appeal:new", onAppealsInv);
+        socket.on("appeal:updated", onAppealsInv);
+        socket.on("enrollment:updated", onAppealsInv);
 
         const joinPresence = () => {
           if (currentUser?.email) {
@@ -357,20 +444,31 @@ const AuthProvider = ({ children } = {}) => {
         };
         document.addEventListener("visibilitychange", visibilityHandler);
 
-        // Set initial user snapshot immediately
-        const initialUser = buildMergedUser(currentUser, null);
+        // Set initial user snapshot immediately from local profile cache if available
+        const cachedMongo = readCachedMongoUser(currentUser.email);
+        const initialUser = buildMergedUser(currentUser, cachedMongo);
         setUser(initialUser);
         setLoading(false);
 
+        if (currentUser.email) {
+          prefetchAuthenticatedBaseline(currentUser.email, Boolean(initialUser?.canCreateCourse));
+        }
+
         // Asynchronously fetch enriched profile from MongoDB with cold-start retry
         try {
-          const res = await apiClient.get(
-            `/users?email=${encodeURIComponent(currentUser.email)}`,
-            { timeout: 60000 }
-          );
+          const userUrl = `/users?email=${encodeURIComponent(currentUser.email)}`;
+          const res = await apiClient.get(userUrl, {
+            timeout: 60000,
+            forceRefresh: true,
+          });
           if (isMounted && res.data) {
+            setCachedData(userUrl, res.data);
+            writeCachedMongoUser(currentUser.email, res.data);
             const merged = buildMergedUser(currentUser, res.data);
             setUser(merged);
+            if (currentUser.email) {
+              prefetchAuthenticatedBaseline(currentUser.email, Boolean(merged?.canCreateCourse));
+            }
             if (merged?.canCreateCourse && currentUser.email) {
               try {
                 localStorage.setItem(
@@ -390,9 +488,20 @@ const AuthProvider = ({ children } = {}) => {
     return () => {
       isMounted = false;
       if (heartbeatInterval) clearInterval(heartbeatInterval);
-      if (onConnectHandler) {
-        const socket = getSocket();
-        socket.off("connect", onConnectHandler);
+      const socket = getSocket();
+      if (onConnectHandler) socket.off("connect", onConnectHandler);
+      if (onConnectionsInv) socket.off("connections:updated", onConnectionsInv);
+      if (onConversationsInv) socket.off("conversation:updated", onConversationsInv);
+      if (onMessageInv) socket.off("message:new", onMessageInv);
+      if (onTeamsInv) {
+        socket.off("team:updated", onTeamsInv);
+        socket.off("team:deleted", onTeamsInv);
+        socket.off("team:member_removed", onTeamsInv);
+      }
+      if (onAppealsInv) {
+        socket.off("appeal:new", onAppealsInv);
+        socket.off("appeal:updated", onAppealsInv);
+        socket.off("enrollment:updated", onAppealsInv);
       }
       if (visibilityHandler) {
         document.removeEventListener("visibilitychange", visibilityHandler);

@@ -17,27 +17,33 @@ import {
 import { toast } from "@/components/ui/toast-system";
 import { showConfirm } from "@/components/ui/confirm-dialog";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import { getSocket } from "@/lib/socket";
 import { formatBDT } from "@/lib/money";
 import InvoiceModal from "@/components/courses/InvoiceModal";
 import StudentManagementModal from "@/components/studio/StudentManagementModal";
 
 const StudioStudentsPage = () => {
-  const [students, setStudents] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [students, setStudents] = useState(
+    () => getCachedData("/studio/students?search=&status=all")?.students || []
+  );
+  const [loading, setLoading] = useState(
+    () => !getCachedData("/studio/students?search=&status=all")
+  );
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [activeInvoiceId, setActiveInvoiceId] = useState(null);
   const [selectedStudentForManage, setSelectedStudentForManage] = useState(null);
 
-  const fetchStudents = useCallback(async () => {
-    setLoading(true);
+  const fetchStudents = useCallback(async (forceRefresh = false) => {
+    const url = `/studio/students?search=${encodeURIComponent(search)}&status=${statusFilter}`;
+    if (!getCachedData(url) && !forceRefresh) setLoading(true);
     try {
-      const res = await apiClient.get(`/studio/students?search=${encodeURIComponent(search)}&status=${statusFilter}`);
+      const res = await apiClient.get(url, { forceRefresh });
       setStudents(res.data?.students || []);
     } catch (err) {
       console.error("Fetch students error:", err);
-      toast.error("Could not fetch enrolled learners.");
+      if (!getCachedData(url)) toast.error("Could not fetch enrolled learners.");
     } finally {
       setLoading(false);
     }

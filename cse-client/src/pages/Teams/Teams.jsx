@@ -31,6 +31,7 @@ import {
   X,
 } from "lucide-react";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import useAuth from "@/hooks/useAuth";
 import { toast } from "@/components/ui/toast-system";
 import { showConfirm } from "@/components/ui/confirm-dialog";
@@ -91,7 +92,9 @@ const Teams = () => {
   const [createdTeamData, setCreatedTeamData] = useState(null);
 
   // My Teams
-  const [myTeams, setMyTeams] = useState([]);
+  const [myTeams, setMyTeams] = useState(
+    () => (user?.email ? getCachedData(`/api/teams/my-squads?email=${user.email}`) : null) || []
+  );
   const [loadingTeams, setLoadingTeams] = useState(false);
   const [teamSearch, setTeamSearch] = useState("");
 
@@ -103,14 +106,19 @@ const Teams = () => {
   const [invitedTeamModal, setInvitedTeamModal] = useState(null);
 
   // Fetch My Teams
-  const fetchMyTeams = async () => {
+  const fetchMyTeams = async (forceRefresh = false) => {
     if (!user?.email) return;
+    const url = `/api/teams/my-squads?email=${user.email}`;
+    const hasCache = Boolean(getCachedData(url));
     try {
-      setLoadingTeams(true);
-      const res = await apiClient.get(`/api/teams/my-squads?email=${user.email}`);
+      if (!hasCache && !forceRefresh) setLoadingTeams(true);
+      const res = await apiClient.get(url, {
+        forceRefresh,
+        onUpdate: (fresh) => Array.isArray(fresh) && setMyTeams(fresh),
+      });
       setMyTeams(res.data || []);
     } catch {
-      toast.error("Failed to load your active squads.");
+      if (!hasCache) toast.error("Failed to load your active squads.");
     } finally {
       setLoadingTeams(false);
     }

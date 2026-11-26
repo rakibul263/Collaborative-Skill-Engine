@@ -2,19 +2,20 @@ import React, { useState, useEffect } from "react";
 import { History, ShieldCheck, UserCheck, RefreshCw, Clock, Activity, AlertTriangle, Key } from "lucide-react";
 import { toast } from "sonner";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 
 const StudioAuditLogsPage = () => {
-  const [logs, setLogs] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [logs, setLogs] = useState(() => getCachedData("/studio/audit-logs") || []);
+  const [loading, setLoading] = useState(() => !getCachedData("/studio/audit-logs"));
 
-  const fetchLogs = async () => {
-    setLoading(true);
+  const fetchLogs = async (forceRefresh = false) => {
+    if (!getCachedData("/studio/audit-logs") && !forceRefresh) setLoading(true);
     try {
-      const res = await apiClient.get("/studio/audit-logs");
+      const res = await apiClient.get("/studio/audit-logs", { forceRefresh });
       setLogs(res.data || []);
     } catch (err) {
       console.error("Fetch audit logs error:", err);
-      toast.error("Could not fetch audit log history.");
+      if (!getCachedData("/studio/audit-logs")) toast.error("Could not fetch audit log history.");
     } finally {
       setLoading(false);
     }

@@ -3,22 +3,23 @@ import { Coins, Users, BookOpen, Star, TrendingUp, PieChart as PieIcon, BarChart
 import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, BarChart, Bar } from "recharts";
 import { toast } from "sonner";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import { formatBDT } from "@/lib/money";
 
 const COLORS = ["#6366f1", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6", "#06b6d4"];
 
 const StudioAnalyticsPage = () => {
-  const [analytics, setAnalytics] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [analytics, setAnalytics] = useState(() => getCachedData("/studio/analytics"));
+  const [loading, setLoading] = useState(() => !getCachedData("/studio/analytics"));
 
-  const fetchAnalytics = async () => {
-    setLoading(true);
+  const fetchAnalytics = async (forceRefresh = false) => {
+    if (!getCachedData("/studio/analytics") && !forceRefresh) setLoading(true);
     try {
-      const res = await apiClient.get("/studio/analytics");
+      const res = await apiClient.get("/studio/analytics", { forceRefresh });
       setAnalytics(res.data);
     } catch (err) {
       console.error("Analytics fetch error:", err);
-      toast.error("Could not fetch analytics data.");
+      if (!getCachedData("/studio/analytics")) toast.error("Could not fetch analytics data.");
     } finally {
       setLoading(false);
     }

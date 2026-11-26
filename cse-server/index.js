@@ -7,6 +7,7 @@ const cors = require("cors");
 const Fuse = require("fuse.js");
 const cookieParser = require("cookie-parser");
 const { createServer } = require("http");
+const zlib = require("zlib");
 const { Server } = require("socket.io");
 const { registerAiAdvisorRoutes } = require("./routes/aiAdvisor.routes");
 const { registerAuthRoutes } = require("./routes/auth.routes");
@@ -113,6 +114,44 @@ app.use(
   })
 );
 app.use(cookieParser());
+
+// ── Fast zero-dep gzip compression for JSON & text API responses (>= 1KB) ──
+app.use((req, res, next) => {
+  if (req.method === "HEAD" || req.headers["x-no-compression"]) return next();
+  const acceptEncoding = String(req.headers["accept-encoding"] || "");
+  if (!/\bgzip\b/i.test(acceptEncoding)) return next();
+
+  const origSend = res.send.bind(res);
+  res.send = (body) => {
+    try {
+      if (res.headersSent || res.getHeader("Content-Encoding")) {
+        return origSend(body);
+      }
+      if (typeof body !== "string") {
+        return origSend(body);
+      }
+      const ctype = String(res.getHeader("Content-Type") || "");
+      if (
+        ctype.includes("text/event-stream") ||
+        ctype.startsWith("image/") ||
+        ctype.startsWith("video/") ||
+        ctype.startsWith("audio/") ||
+        ctype.includes("application/pdf") ||
+        body.length < 1024
+      ) {
+        return origSend(body);
+      }
+      const compressed = zlib.gzipSync(Buffer.from(body, "utf8"), { level: 6 });
+      res.setHeader("Content-Encoding", "gzip");
+      res.setHeader("Vary", "Accept-Encoding");
+      res.setHeader("Content-Length", compressed.length);
+      return res.end(compressed);
+    } catch {
+      return origSend(body);
+    }
+  };
+  next();
+});
 
 // ── Global IP restriction middleware ──
 app.use((req, res, next) => {
@@ -234,6 +273,8 @@ async function run() {
       { senderEmail: 1, receiverEmail: 1, status: 1 },
       { unique: true, partialFilterExpression: { status: "pending" } },
     );
+    await connectionRequestsCollection.createIndex({ receiverEmail: 1, status: 1, createdAt: -1 });
+    await connectionRequestsCollection.createIndex({ senderEmail: 1, status: 1 });
     await conversationsCollection.createIndex(
       { participantsKey: 1 },
       { unique: true },
@@ -261,6 +302,7 @@ async function run() {
 
     // High performance indexes for Users, Admin Telemetry & Audits
     await usersCollection.createIndex({ email: 1 });
+    await usersCollection.createIndex({ username: 1 });
     await usersCollection.createIndex({ role: 1 });
     await usersCollection.createIndex({ createdAt: -1 });
     await usersCollection.createIndex({ isDeactivated: 1 });
@@ -271,6 +313,7 @@ async function run() {
     await schedulesCollection.createIndex({ schedulerEmail: 1, status: 1 });
 
     await coursesCollection.createIndex({ instructorEmail: 1, status: 1 });
+    await coursesCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
     await coursesCollection.createIndex({ status: 1 });
     await coursesCollection.createIndex({ createdAt: -1 });
     await coursesCollection.createIndex({ status: 1, createdAt: -1 });
@@ -286,8 +329,12 @@ async function run() {
       { unique: true }
     );
     await courseEnrollmentsCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
+    await courseEnrollmentsCollection.createIndex({ learnerEmail: 1, createdAt: -1 });
     await courseEnrollmentsCollection.createIndex({ createdAt: -1 });
     await courseEnrollmentsCollection.createIndex({ learnerEmail: 1, status: 1 });
+    await courseAppealsCollection.createIndex({ instructorEmail: 1, updatedAt: -1, createdAt: -1 });
+    await courseReviewsCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
+    await studioAuditLogsCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
     await lessonsCollection.createIndex({ courseId: 1, order: 1 });
     await lessonProgressCollection.createIndex({ learnerEmail: 1, courseId: 1 });
     await lessonProgressCollection.createIndex(
@@ -1447,6 +1494,12 @@ async function run() {
     });
 
     // ===== patch user profile =====
+    let mentorPoolCache = null;
+    let mentorPoolExpiresAt = 0;
+    const invalidateMentorPoolCache = () => {
+      mentorPoolCache = null;
+      mentorPoolExpiresAt = 0;
+    };
 
     // Fields that must never be overwritten by a client PATCH request
     const PROFILE_FIELD_BLOCKLIST = new Set([
@@ -1583,6 +1636,7 @@ async function run() {
 
         const { calculateProfileCompletion } = require("./utils/profileCompletion");
         const profileCompletion = calculateProfileCompletion(updatedUser);
+        invalidateMentorPoolCache();
 
         return res.status(200).json({
           success: true,
@@ -1831,17 +1885,78 @@ async function run() {
       }
 
       const authEmail = (req.user?.email || "").toLowerCase().trim();
-      if (email && email.toLowerCase().trim() !== authEmail) {
+      const rawEmail = String(email).trim();
+      if (rawEmail.toLowerCase() !== authEmail) {
         return res.status(403).send({ message: "Access denied. You can only view your own incoming requests." });
       }
 
       try {
-        const requests = await connectionRequestsCollection
-          .find({ receiverEmail: email, status: "pending" })
+        const emailVariants = Array.from(new Set([rawEmail, authEmail].filter(Boolean)));
+        let requests = await connectionRequestsCollection
+          .find({ receiverEmail: { $in: emailVariants }, status: "pending" })
           .sort({ createdAt: -1 })
           .toArray();
 
-        return res.send(requests.map((request) => toPublicRequest(request, email)));
+        if (requests.length === 0) {
+          requests = await connectionRequestsCollection
+            .find({
+              receiverEmail: new RegExp(`^${escapeRegex(authEmail)}$`, "i"),
+              status: "pending",
+            })
+            .sort({ createdAt: -1 })
+            .toArray();
+        }
+
+        const senderEmails = Array.from(
+          new Set(
+            requests
+              .flatMap((r) => [r.senderEmail, String(r.senderEmail || "").toLowerCase().trim()])
+              .filter(Boolean)
+          )
+        );
+        const senderDocs =
+          senderEmails.length > 0
+            ? await usersCollection
+                .find(
+                  { email: { $in: senderEmails } },
+                  {
+                    projection: {
+                      email: 1,
+                      fullName: 1,
+                      name: 1,
+                      profileImage: 1,
+                      image: 1,
+                      headline: 1,
+                      bio: 1,
+                      education: 1,
+                      location: 1,
+                      website: 1,
+                      github: 1,
+                      linkedin: 1,
+                      portfolio: 1,
+                      teachSkills: 1,
+                      learnSkills: 1,
+                      teachLevel: 1,
+                      learnLevel: 1,
+                      projects: 1,
+                      certificates: 1,
+                    },
+                  }
+                )
+                .toArray()
+            : [];
+        const senderMap = new Map(
+          senderDocs.map((u) => [String(u.email || "").toLowerCase().trim(), u])
+        );
+
+        return res.send(
+          requests.map((request) => {
+            const payload = toPublicRequest(request, rawEmail);
+            const senderProfile =
+              senderMap.get(String(request.senderEmail || "").toLowerCase().trim()) || null;
+            return senderProfile ? { ...payload, senderProfile } : payload;
+          })
+        );
       } catch (error) {
         return res.status(500).send({ message: "Failed to fetch requests" });
       }
@@ -2416,6 +2531,8 @@ async function run() {
           ])
           .toArray();
 
+        invalidateMentorPoolCache();
+
         return res.send({
           message: fraudCheck.isFraud
             ? "Rating submitted for verification"
@@ -2498,6 +2615,7 @@ async function run() {
         };
 
         const result = await usersCollection.insertOne(userToInsert);
+        invalidateMentorPoolCache();
         res.send(result);
       } catch (error) {
         res.status(500).send(error);
@@ -2892,11 +3010,90 @@ async function run() {
 
     // ================= FIND MENTORS =================
 
+    const getMentorPool = async () => {
+      if (mentorPoolCache && Date.now() < mentorPoolExpiresAt) {
+        return mentorPoolCache;
+      }
+      const poolUsers = await usersCollection
+        .find(
+          { teachSkills: { $exists: true, $ne: [] } },
+          {
+            projection: {
+              _id: 1,
+              fullName: 1,
+              name: 1,
+              email: 1,
+              profileImage: 1,
+              photoURL: 1,
+              bio: 1,
+              about: 1,
+              headline: 1,
+              designation: 1,
+              education: 1,
+              teachLevel: 1,
+              learnLevel: 1,
+              teachSkills: 1,
+              learnSkills: 1,
+            },
+          }
+        )
+        .toArray();
+
+      const poolEmails = poolUsers.map((u) => u.email).filter(Boolean);
+      const ratingSummary =
+        poolEmails.length > 0
+          ? await ratingsCollection
+              .aggregate([
+                { $match: { targetEmail: { $in: poolEmails }, fraudStatus: { $ne: "QUARANTINED" } } },
+                {
+                  $group: {
+                    _id: "$targetEmail",
+                    averageRating: { $avg: "$rating" },
+                    totalRatings: { $sum: 1 },
+                  },
+                },
+              ])
+              .toArray()
+          : [];
+
+      const ratingMap = new Map(
+        ratingSummary.map((r) => [
+          r._id,
+          {
+            averageRating: Number((r.averageRating || 0).toFixed(1)),
+            totalRatings: r.totalRatings || 0,
+          },
+        ])
+      );
+
+      mentorPoolCache = { poolUsers, ratingMap };
+      mentorPoolExpiresAt = Date.now() + 20000;
+      return mentorPoolCache;
+    };
+
     app.get("/find-mentors", async (req, res) => {
       try {
-        const { email } = req.query;
+        const rawEmail = String(req.query.email || "").trim();
+        const lowerEmail = rawEmail.toLowerCase();
+        const emailVariants = Array.from(new Set([rawEmail, lowerEmail].filter(Boolean)));
 
-        const currentUser = await usersCollection.findOne({ email });
+        const [currentUser, mentorPool, pendingRequests] = await Promise.all([
+          findUserByEmail(usersCollection, lowerEmail, {
+            projection: { email: 1, learnSkills: 1, connections: 1 },
+          }),
+          getMentorPool(),
+          emailVariants.length > 0
+            ? connectionRequestsCollection
+                .find({
+                  status: "pending",
+                  $or: [
+                    { senderEmail: { $in: emailVariants } },
+                    { receiverEmail: { $in: emailVariants } },
+                  ],
+                })
+                .toArray()
+            : Promise.resolve([]),
+        ]);
 
         if (!currentUser) {
           return res.status(404).send({ message: "User not found" });
@@ -2908,58 +3105,22 @@ async function run() {
             normalized: normalize(s),
           })) || [];
 
-        const [otherUsers, pendingRequests] = await Promise.all([
-          usersCollection
-          .find({
-            email: { $ne: email },
-            teachSkills: { $exists: true, $ne: [] },
-          })
-          .toArray(),
-          connectionRequestsCollection
-            .find({
-              status: "pending",
-              $or: [{ senderEmail: email }, { receiverEmail: email }],
-            })
-            .toArray(),
-        ]);
+        const otherUsers = mentorPool.poolUsers.filter(
+          (u) => String(u.email || "").toLowerCase().trim() !== lowerEmail
+        );
+        const ratingMap = mentorPool.ratingMap;
 
         const pendingRequestMap = new Map();
         pendingRequests.forEach((request) => {
-          const otherEmail =
-            request.senderEmail === email
-              ? request.receiverEmail
-              : request.senderEmail;
+          const isSender = String(request.senderEmail || "").toLowerCase().trim() === lowerEmail;
+          const otherEmail = isSender ? request.receiverEmail : request.senderEmail;
 
-          const connectionStatus =
-            request.senderEmail === email ? "sent" : "received";
+          const connectionStatus = isSender ? "sent" : "received";
           pendingRequestMap.set(otherEmail, {
             connectionStatus,
             requestId: request._id,
           });
         });
-
-        const otherUserEmails = otherUsers.map((u) => u.email).filter(Boolean);
-        const ratingSummary = await ratingsCollection
-          .aggregate([
-            { $match: { targetEmail: { $in: otherUserEmails } } },
-            {
-              $group: {
-                _id: "$targetEmail",
-                averageRating: { $avg: "$rating" },
-                totalRatings: { $sum: 1 },
-              },
-            },
-          ])
-          .toArray();
-        const ratingMap = new Map(
-          ratingSummary.map((r) => [
-            r._id,
-            {
-              averageRating: Number((r.averageRating || 0).toFixed(1)),
-              totalRatings: r.totalRatings || 0,
-            },
-          ]),
-        );
 
         let results = [];
 

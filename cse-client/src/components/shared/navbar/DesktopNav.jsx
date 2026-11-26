@@ -2,9 +2,12 @@ import React, { useState, useRef, useEffect } from "react";
 import { NavLink, useLocation } from "react-router";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, Sparkles } from "lucide-react";
+import useAuth from "@/hooks/useAuth";
+import { prefetchRoute } from "@/lib/prefetchManager";
 
 const DesktopNav = ({ items }) => {
   const location = useLocation();
+  const { user } = useAuth();
   const [activeDropdown, setActiveDropdown] = useState(null);
   const timeoutRef = useRef(null);
   const navRef = useRef(null);
@@ -60,6 +63,8 @@ const DesktopNav = ({ items }) => {
             <NavLink
               key={item.name}
               to={item.path}
+              onMouseEnter={() => prefetchRoute(item.path, user?.email)}
+              onFocus={() => prefetchRoute(item.path, user?.email)}
               className={`relative flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-xl transition-all duration-200 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 ${
                 isActive
                   ? "bg-gradient-to-r from-indigo-600 to-purple-600 text-white shadow-md shadow-indigo-500/20"
@@ -81,11 +86,15 @@ const DesktopNav = ({ items }) => {
           <div
             key={item.name}
             className="relative"
-            onMouseEnter={() => item.hasChildren && handleMouseEnter(item.name)}
+            onMouseEnter={() => {
+              prefetchRoute(item.path, user?.email);
+              if (item.hasChildren) handleMouseEnter(item.name);
+            }}
             onMouseLeave={() => item.hasChildren && handleMouseLeave()}
           >
             <NavLink
               to={item.path}
+              onFocus={() => prefetchRoute(item.path, user?.email)}
               onClick={(e) => {
                 if (item.hasChildren) {
                   e.preventDefault();
@@ -166,6 +175,8 @@ const DesktopNav = ({ items }) => {
                         <NavLink
                           key={child.title}
                           to={child.path}
+                          onMouseEnter={() => prefetchRoute(child.path, user?.email)}
+                          onFocus={() => prefetchRoute(child.path, user?.email)}
                           onClick={() => setActiveDropdown(null)}
                           className={`flex items-start gap-3 p-3 rounded-xl transition-all group ${
                             isSubActive

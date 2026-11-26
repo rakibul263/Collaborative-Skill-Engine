@@ -290,13 +290,50 @@ const registerStudioRoutes = (app, {
   // GET /studio/analytics — detailed creator analytics & charts
   app.get("/studio/analytics", verifyJWT, async (req, res) => {
     try {
-      const emailRegex = new RegExp(`^${escapeRegex(req.user.email)}$`, "i");
+      const cleanEmail = String(req.user.email || "").trim();
+      const lowerEmail = cleanEmail.toLowerCase();
+      const emailVariants = Array.from(new Set([cleanEmail, lowerEmail].filter(Boolean)));
+      const emailRegex = new RegExp(`^${escapeRegex(lowerEmail)}$`, "i");
 
-      const courses = await coursesCollection.find({ instructorEmail: emailRegex }).toArray();
+      const [initialCourses, initialEnrollments, ratingsResult] = await Promise.all([
+        coursesCollection
+          .find(
+            { instructorEmail: { $in: emailVariants } },
+            { projection: { _id: 1, title: 1, topic: 1, price: 1, pricePoisha: 1, status: 1 } }
+          )
+          .toArray(),
+        courseEnrollmentsCollection
+          .find({ instructorEmail: { $in: emailVariants } })
+          .toArray(),
+        ratingsCollection
+          .aggregate([
+            { $match: { targetEmail: { $in: emailVariants } } },
+            { $group: { _id: null, avg: { $avg: "$rating" }, count: { $sum: 1 } } },
+          ])
+          .toArray(),
+      ]);
+
+      const courses =
+        initialCourses.length > 0
+          ? initialCourses
+          : await coursesCollection
+              .find(
+                { instructorEmail: emailRegex },
+                { projection: { _id: 1, title: 1, topic: 1, price: 1, pricePoisha: 1, status: 1 } }
+              )
+              .toArray();
+
+      const enrollments =
+        initialEnrollments.length > 0
+          ? initialEnrollments
+          : await courseEnrollmentsCollection.find({ instructorEmail: emailRegex }).toArray();
+
       const courseIds = courses.map((c) => c._id);
-
-      const enrollments = await courseEnrollmentsCollection.find({ instructorEmail: emailRegex }).toArray();
-      const lessons = await lessonsCollection.find({ courseId: { $in: courseIds } }).toArray();
+      const lessons = courseIds.length > 0
+        ? await lessonsCollection
+            .find({ courseId: { $in: courseIds } }, { projection: { _id: 1 } })
+            .toArray()
+        : [];
 
       const now = new Date();
       const todayKey = now.toISOString().substring(0, 10);
@@ -380,11 +417,6 @@ const registerStudioRoutes = (app, {
       });
       const categoryDistribution = Array.from(categoryMap.entries()).map(([name, count]) => ({ name, value: count }));
 
-      const ratingsResult = await ratingsCollection.aggregate([
-        { $match: { targetEmail: emailRegex } },
-        { $group: { _id: null, avg: { $avg: "$rating" }, count: { $sum: 1 } } },
-      ]).toArray();
-
       return res.json({
         currency: CURRENCY_CODE,
         totalRevenue: fromPoisha(totalRevenuePoisha),
@@ -429,7 +461,7 @@ const registerStudioRoutes = (app, {
 
       const learnerEmails = [...new Set(enrollments.map((e) => e.learnerEmail))];
       const courseIds = [...new Set(enrollments.map((e) => e.courseId).filter(Boolean))];
-      const [learners, courseLessons, progressRecords] = await Promise.all([
+      const [learners, courseLessons, progressRecords, instructorAppeals] = await Promise.all([
         usersCollection
           .find(
             { email: { $in: learnerEmails } },
@@ -439,6 +471,14 @@ const registerStudioRoutes = (app, {
         lessonsCollection ? lessonsCollection.find({ courseId: { $in: courseIds } }).toArray() : [],
         lessonProgressCollection
           ? lessonProgressCollection.find({ courseId: { $in: courseIds } }).toArray()
+          : [],
+        courseAppealsCollection
+          ? courseAppealsCollection
+              .find({
+                instructorEmail: new RegExp(`^${req.user.email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
+              })
+              .sort({ createdAt: -1 })
+              .toArray()
           : [],
       ]);
 
@@ -470,14 +510,7 @@ const registerStudioRoutes = (app, {
 
       // Load appeals submitted to this instructor for these enrollments
       const appealsByEnrollment = new Map();
-      if (courseAppealsCollection) {
-        const instructorAppeals = await courseAppealsCollection
-          .find({
-            instructorEmail: new RegExp(`^${req.user.email.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i"),
-          })
-          .sort({ createdAt: -1 })
-          .toArray();
-
+      if (Array.isArray(instructorAppeals)) {
         for (const appDoc of instructorAppeals) {
           const k = appDoc.enrollmentId ? appDoc.enrollmentId.toString() : null;
           if (k) {

@@ -21,6 +21,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import useAuth from "@/hooks/useAuth";
 import apiClient from "@/lib/apiClient";
 import { getSocket } from "@/lib/socket";
+import { prefetchRoute } from "@/lib/prefetchManager";
 
 const StudioSidebar = ({ isCollapsed, toggleCollapse, mobileOpen, closeMobileDrawer }) => {
   const navigate = useNavigate();
@@ -108,6 +109,8 @@ const StudioSidebar = ({ isCollapsed, toggleCollapse, mobileOpen, closeMobileDra
       <NavLink
         key={item.path}
         to={item.path}
+        onMouseEnter={() => prefetchRoute(item.path, user?.email)}
+        onFocus={() => prefetchRoute(item.path, user?.email)}
         onClick={() => closeMobileDrawer && closeMobileDrawer()}
         className={({ isActive }) =>
           `flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition-all group ${

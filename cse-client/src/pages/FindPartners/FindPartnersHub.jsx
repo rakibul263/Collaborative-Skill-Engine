@@ -35,6 +35,7 @@ import {
 import { toast } from "sonner";
 import useAuth from "@/hooks/useAuth";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import { LoadingSpinner } from "@/components/shared/loading/LoadingSpinner";
 
 const POPULAR_SKILLS = [
@@ -75,10 +76,49 @@ const FindPartnersHub = () => {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Data states
-  const [partners, setPartners] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [platformStats, setPlatformStats] = useState(null);
+  // Data states (initialized synchronously from cache when available)
+  const initialStatsCache = useMemo(() => getCachedData("/platform-stats"), []);
+  const initialMentorCache = useMemo(
+    () => (user?.email ? getCachedData(`/find-mentors?email=${encodeURIComponent(user.email)}`) : null),
+    [user?.email]
+  );
+
+  const buildCombinedPartners = useCallback(
+    (statsData, mentorList) => {
+      const matchedList = Array.isArray(mentorList) ? mentorList : [];
+      const fallbackExperts = statsData?.experts || [];
+      const combinedMap = new Map();
+
+      matchedList.forEach((m) => {
+        if (m.email && m.email !== user?.email) {
+          combinedMap.set(m.email, { ...m, isAiMatch: true });
+        }
+      });
+
+      fallbackExperts.forEach((e) => {
+        if (e.email && e.email !== user?.email && !combinedMap.has(e.email)) {
+          combinedMap.set(e.email, {
+            ...e,
+            teachLevel: e.teachLevel || "Intermediate",
+            connectionStatus: e.connectionStatus || "none",
+            averageRating: e.averageRating || 5.0,
+            totalRatings: e.totalRatings || 1,
+            isAiMatch: false,
+            matchPercentage: 75,
+          });
+        }
+      });
+
+      return Array.from(combinedMap.values());
+    },
+    [user?.email]
+  );
+
+  const [partners, setPartners] = useState(() =>
+    initialStatsCache || initialMentorCache ? buildCombinedPartners(initialStatsCache, initialMentorCache) : []
+  );
+  const [loading, setLoading] = useState(() => !(initialStatsCache || initialMentorCache));
+  const [platformStats, setPlatformStats] = useState(() => initialStatsCache || null);
 
   // Filter & Search states
   const [searchQuery, setSearchQuery] = useState("");
@@ -91,66 +131,37 @@ const FindPartnersHub = () => {
   const [connectingId, setConnectingId] = useState(null);
   const [openFaqIndex, setOpenFaqIndex] = useState(null);
 
-  // Fetch partners & platform data
-  const fetchData = useCallback(async () => {
-    setLoading(true);
+  // Fetch partners & platform data in parallel
+  const fetchData = useCallback(async (forceRefresh = false) => {
+    const hasWarmCache = Boolean(
+      getCachedData("/platform-stats") ||
+        (user?.email && getCachedData(`/find-mentors?email=${encodeURIComponent(user.email)}`))
+    );
+    if (!hasWarmCache && !forceRefresh) {
+      setLoading(true);
+    }
     try {
-      // 1. Fetch platform stats & top experts
-      const statsRes = await apiClient.get("/platform-stats").catch(() => ({ data: null }));
+      const [statsRes, mentorRes] = await Promise.all([
+        apiClient.get("/platform-stats", { forceRefresh }).catch(() => ({ data: null })),
+        user?.email
+          ? apiClient
+              .get(`/find-mentors?email=${encodeURIComponent(user.email)}`, { forceRefresh })
+              .catch(() => ({ data: [] }))
+          : Promise.resolve({ data: [] }),
+      ]);
+
       if (statsRes.data) {
         setPlatformStats(statsRes.data);
       }
 
-      // 2. If user is logged in, fetch matched mentors
-      let matchedList = [];
-      if (user?.email) {
-        try {
-          const mentorRes = await apiClient.get(`/find-mentors?email=${encodeURIComponent(user.email)}`);
-          if (Array.isArray(mentorRes.data) && mentorRes.data.length > 0) {
-            matchedList = mentorRes.data;
-          }
-        } catch (mErr) {
-          console.warn("Could not fetch user-specific matches:", mErr);
-        }
-      }
-
-      // 3. Fallback or merge with platform experts
-      const fallbackExperts = statsRes.data?.experts || [];
-      const combinedMap = new Map();
-
-      // Priority 1: User's AI matched partners
-      matchedList.forEach((m) => {
-        if (m.email && m.email !== user?.email) {
-          combinedMap.set(m.email, {
-            ...m,
-            isAiMatch: true,
-          });
-        }
-      });
-
-      // Priority 2: Platform verified experts
-      fallbackExperts.forEach((e) => {
-        if (e.email && e.email !== user?.email && !combinedMap.has(e.email)) {
-          combinedMap.set(e.email, {
-            ...e,
-            teachLevel: e.teachLevel || "Intermediate",
-            connectionStatus: e.connectionStatus || "none",
-            averageRating: e.averageRating || 5.0,
-            totalRatings: e.totalRatings || 1,
-            isAiMatch: false,
-            matchPercentage: 75, // Standard baseline compatibility
-          });
-        }
-      });
-
-      setPartners(Array.from(combinedMap.values()));
+      setPartners(buildCombinedPartners(statsRes.data, mentorRes.data));
     } catch (err) {
       console.error("Error loading partners:", err);
       toast.error("Failed to load partner network. Please refresh.");
     } finally {
       setLoading(false);
     }
-  }, [user?.email]);
+  }, [user?.email, buildCombinedPartners]);
 
   useEffect(() => {
     fetchData();

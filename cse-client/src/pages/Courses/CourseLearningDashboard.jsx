@@ -25,6 +25,7 @@ import {
 } from "lucide-react";
 import useAuth from "@/hooks/useAuth";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import { extractYouTubeId } from "@/lib/youtube";
 import ProtectedVideoPlayer from "@/components/courses/ProtectedVideoPlayer";
 import ProtectedPdfModal from "@/components/courses/ProtectedPdfModal";
@@ -68,17 +69,36 @@ const CourseLearningDashboard = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const [course, setCourse] = useState(null);
-  const [lessons, setLessons] = useState([]);
-  const [canWatchAll, setCanWatchAll] = useState(false);
-  const [enrollmentMeta, setEnrollmentMeta] = useState(null);
-  const [serverProgress, setServerProgress] = useState(null);
-  const [localProgress, setLocalProgress] = useState({});
-  const [certificateState, setCertificateState] = useState(null);
+  const initialCourse = useMemo(() => {
+    const direct = getCachedData(`/courses/public/${id}`);
+    if (direct) return direct;
+    const list = getCachedData("/courses/public");
+    return Array.isArray(list) ? list.find((c) => c._id === id) || null : null;
+  }, [id]);
+  const initialLessonsData = useMemo(() => getCachedData(`/courses/public/${id}/lessons`), [id]);
+  const initialEnrollData = useMemo(() => getCachedData(`/courses/${id}/enrollment`), [id]);
 
-  const [activeLessonId, setActiveLessonId] = useState(null);
+  const [course, setCourse] = useState(() => initialCourse);
+  const [lessons, setLessons] = useState(() => initialLessonsData?.lessons || []);
+  const [canWatchAll, setCanWatchAll] = useState(() =>
+    Boolean(initialLessonsData?.canWatchAll || initialEnrollData?.enrolled)
+  );
+  const [enrollmentMeta, setEnrollmentMeta] = useState(() => initialEnrollData || null);
+  const [serverProgress, setServerProgress] = useState(() => initialLessonsData?.courseProgress || null);
+  const [localProgress, setLocalProgress] = useState({});
+  const [certificateState, setCertificateState] = useState(() => initialLessonsData?.certificate || null);
+
+  const [activeLessonId, setActiveLessonId] = useState(() => {
+    const list = initialLessonsData?.lessons || [];
+    const firstWithVideo = list.find((l) => !l.locked && getLessonVideos(l).some((v) => v.embedId));
+    return (firstWithVideo || list.find((l) => !l.locked) || list[0] || null)?._id || null;
+  });
   const [activePartIndex, setActivePartIndex] = useState(0);
-  const [expandedLessonIds, setExpandedLessonIds] = useState([]);
+  const [expandedLessonIds, setExpandedLessonIds] = useState(() => {
+    const list = initialLessonsData?.lessons || [];
+    const first = list.find((l) => !l.locked) || list[0];
+    return first?._id ? [first._id] : [];
+  });
   const [activeTab, setActiveTab] = useState("playlist"); // playlist | resources | overview
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [lessonSearch, setLessonSearch] = useState("");
@@ -91,15 +111,17 @@ const CourseLearningDashboard = () => {
   });
   const [invoiceOpen, setInvoiceOpen] = useState(false);
   const [certificateModalOpen, setCertificateModalOpen] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !(initialCourse && initialLessonsData));
   const [accessDenied, setAccessDenied] = useState(false);
 
-  const loadClassroomData = useCallback(async () => {
+  const loadClassroomData = useCallback(async (forceRefresh = false) => {
     try {
       const [courseRes, lessonsRes, enrollRes] = await Promise.all([
-        apiClient.get(`/courses/public/${id}`),
-        apiClient.get(`/courses/public/${id}/lessons`),
-        apiClient.get(`/courses/${id}/enrollment`).catch(() => ({ data: { enrolled: false } })),
+        apiClient.get(`/courses/public/${id}`, { forceRefresh }),
+        apiClient.get(`/courses/public/${id}/lessons`, { forceRefresh }),
+        apiClient
+          .get(`/courses/${id}/enrollment`, { forceRefresh })
+          .catch(() => ({ data: { enrolled: false } })),
       ]);
 
       setCourse(courseRes.data);

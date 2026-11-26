@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import CourseGrid from "@/components/courses/CourseGrid";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import useAuth from "@/hooks/useAuth";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3000";
@@ -29,14 +30,17 @@ const CATEGORIES = [
 
 const CoursesMarketplace = () => {
   const { user } = useAuth();
-  const [allCourses, setAllCourses] = useState([]);
+  const [allCourses, setAllCourses] = useState(() => getCachedData("/courses/public") || []);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("All Topics");
   const [sortBy, setSortBy] = useState("newest"); // "newest" | "price-low" | "price-high"
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !getCachedData("/courses/public"));
   const [error, setError] = useState("");
   const [eligRecord, setEligRecord] = useState({ email: "", value: null });
-  const [enrolledIds, setEnrolledIds] = useState(() => new Set());
+  const [enrolledIds, setEnrolledIds] = useState(() => {
+    const cached = getCachedData("/courses/my-enrollments");
+    return new Set(Array.isArray(cached) ? cached.map((c) => c._id) : []);
+  });
 
   const userEmailKey = user?.email ? user.email.toLowerCase().trim() : "";
   const canCreateCourse = useMemo(() => {
@@ -52,13 +56,21 @@ const CoursesMarketplace = () => {
     }
   }, [userEmailKey, eligRecord, user?.canCreateCourse]);
 
-  // Fetch published courses with auto-retry on network/boot delay
-  const fetchCourses = useCallback(async () => {
-    setLoading(true);
+  // Fetch published courses with instant cache + SWR + auto-retry on network/boot delay
+  const fetchCourses = useCallback(async (forceRefresh = false) => {
+    if (!getCachedData("/courses/public") || forceRefresh) {
+      if (!getCachedData("/courses/public")) setLoading(true);
+    }
     setError("");
     const attemptLoad = async (attempt = 0) => {
       try {
-        const res = await apiClient.get("/courses/public", { timeout: 65000 });
+        const res = await apiClient.get("/courses/public", {
+          timeout: 65000,
+          forceRefresh,
+          onUpdate: (fresh) => {
+            if (Array.isArray(fresh)) setAllCourses(fresh);
+          },
+        });
         setAllCourses(res.data || []);
         setLoading(false);
       } catch (err) {

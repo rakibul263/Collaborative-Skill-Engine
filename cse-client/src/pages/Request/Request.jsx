@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import axios from "axios";
+import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
+import { getSocket } from "@/lib/socket";
 import { showConfirm } from "@/components/ui/confirm-dialog";
 import { toast } from "@/components/ui/toast-system";
 import { useNavigate } from "react-router";
@@ -132,12 +134,26 @@ const Request = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const [requests, setRequests] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [myProfileData, setMyProfileData] = useState(null);
+  const reqCacheUrl = user?.email ? `/connections/requests/incoming?email=${encodeURIComponent(user.email)}` : "";
+  const profileCacheUrl = user?.email ? `/users?email=${encodeURIComponent(user.email)}` : "";
 
-  // Map of senderEmail -> enriched user profile
-  const [requesterProfiles, setRequesterProfiles] = useState({});
+  const initialRequests = reqCacheUrl ? getCachedData(reqCacheUrl) || [] : [];
+  const [requests, setRequests] = useState(() => initialRequests);
+  const [loading, setLoading] = useState(() => Boolean(user?.email && !getCachedData(reqCacheUrl)));
+  const [myProfileData, setMyProfileData] = useState(
+    () => (profileCacheUrl ? getCachedData(profileCacheUrl) || user?.dbUser || null : null)
+  );
+
+  // Map of senderEmail -> enriched user profile (populated from inline senderProfile)
+  const [requesterProfiles, setRequesterProfiles] = useState(() => {
+    const seeded = {};
+    initialRequests.forEach((r) => {
+      if (r.senderEmail && r.senderProfile) {
+        seeded[r.senderEmail] = r.senderProfile;
+      }
+    });
+    return seeded;
+  });
 
   // Preview Modal State
   const [selectedReq, setSelectedReq] = useState(null);
@@ -151,56 +167,61 @@ const Request = () => {
   const fetchMyProfile = useCallback(async () => {
     if (!user?.email) return;
     try {
-      const res = await axios.get(`${API_URL}/users?email=${encodeURIComponent(user.email)}`);
-      setMyProfileData(res.data);
+      const res = await apiClient.get(`/users?email=${encodeURIComponent(user.email)}`);
+      if (res.data) setMyProfileData(res.data);
     } catch (err) {
       console.error("Failed to fetch current user profile:", err);
     }
   }, [user?.email]);
 
-  // 2. Fetch Incoming Requests & Enrich Requesters
-  const fetchRequests = useCallback(async () => {
+  // 2. Fetch Incoming Requests (single indexed batch response, no N+1 loop)
+  const fetchRequests = useCallback(async (forceRefresh = false) => {
     if (!user?.email) return;
+    const url = `/connections/requests/incoming?email=${encodeURIComponent(user.email)}`;
     try {
-      const res = await axios.get(
-        `${API_URL}/connections/requests/incoming?email=${encodeURIComponent(user.email)}`
-      );
+      const res = await apiClient.get(url, {
+        forceRefresh,
+        onUpdate: (fresh) => Array.isArray(fresh) && setRequests(fresh),
+      });
       const incomingList = res.data || [];
       setRequests(incomingList);
 
-      // Fetch enriched profiles for requesters in background
-      incomingList.forEach(async (req) => {
-        if (!requesterProfiles[req.senderEmail]) {
-          try {
-            const pRes = await axios.get(`${API_URL}/users?email=${encodeURIComponent(req.senderEmail)}`);
-            if (pRes.data) {
-              setRequesterProfiles((prev) => ({
-                ...prev,
-                [req.senderEmail]: pRes.data,
-              }));
-            }
-          } catch {
-            // silent fallback
-          }
+      const inlineProfiles = {};
+      incomingList.forEach((reqItem) => {
+        if (reqItem.senderEmail && reqItem.senderProfile) {
+          inlineProfiles[reqItem.senderEmail] = reqItem.senderProfile;
         }
       });
+      if (Object.keys(inlineProfiles).length > 0) {
+        setRequesterProfiles((prev) => ({ ...prev, ...inlineProfiles }));
+      }
     } catch (error) {
       console.error("Fetch requests error:", error);
     } finally {
       setLoading(false);
     }
-  }, [user?.email, requesterProfiles]);
+  }, [user?.email]);
 
   useEffect(() => {
     fetchMyProfile();
-    fetchRequests();
+    fetchRequests(false);
+
+    if (!user?.email) return undefined;
+    const socket = getSocket();
+    const onConnectionsUpdated = () => fetchRequests(true);
+    socket.on("connections:updated", onConnectionsUpdated);
 
     const intervalId = setInterval(() => {
-      fetchRequests();
-    }, 4000);
+      if (document.visibilityState === "visible") {
+        fetchRequests(true);
+      }
+    }, 30000);
 
-    return () => clearInterval(intervalId);
-  }, [fetchMyProfile, fetchRequests]);
+    return () => {
+      socket.off("connections:updated", onConnectionsUpdated);
+      clearInterval(intervalId);
+    };
+  }, [fetchMyProfile, fetchRequests, user?.email]);
 
   // ─── OPEN PROFILE PREVIEW MODAL ─────────────────────────────────────────────
   const handleOpenPreview = async (req) => {
@@ -210,7 +231,7 @@ const Request = () => {
     if (!requesterProfiles[req.senderEmail]) {
       setLoadingPreview(true);
       try {
-        const pRes = await axios.get(`${API_URL}/users?email=${encodeURIComponent(req.senderEmail)}`);
+        const pRes = await apiClient.get(`/users?email=${encodeURIComponent(req.senderEmail)}`);
         if (pRes.data) {
           setRequesterProfiles((prev) => ({
             ...prev,
@@ -246,7 +267,7 @@ const Request = () => {
     if (!confirm.isConfirmed) return;
 
     try {
-      const res = await axios.patch(`${API_URL}/connections/requests/respond`, {
+      const res = await apiClient.patch("/connections/requests/respond", {
         senderEmail,
         receiverEmail: user.email,
         responderEmail: user.email,

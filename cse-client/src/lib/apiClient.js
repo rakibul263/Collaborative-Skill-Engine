@@ -1,6 +1,16 @@
 import axios from "axios";
 import { getJWT, setJWT, clearJWT, isTokenExpired } from "./jwt";
 import { auth } from "@/firebase/firebase.init";
+import {
+  buildFastCacheKey,
+  dedupeInFlight,
+  getFastCacheEntry,
+  invalidateCacheForMutation,
+  normalizeApiPath,
+  resolveFreshTtlMs,
+  setCachedData,
+  shouldBypassFastCache,
+} from "./fastCache";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
@@ -11,6 +21,26 @@ const apiClient = axios.create({
 
 let exchanging = null;
 
+const PUBLIC_NO_AUTH_PREFIXES = [
+  "/platform-stats",
+  "/courses/public",
+  "/notifications",
+  "/ratings/summary",
+  "/api/skill-graph/ontology",
+  "/api/teams/roles",
+  "/courses/certificates/verify",
+  "/auth/ip-status",
+  "/health",
+  "/users",
+  "/find-mentors",
+  "/experts/",
+];
+
+const isPublicNoBlockPath = (url = "") => {
+  const path = normalizeApiPath(url);
+  return PUBLIC_NO_AUTH_PREFIXES.some((prefix) => path.startsWith(prefix));
+};
+
 export const exchangeToken = async () => {
   if (exchanging) return exchanging;
 
@@ -19,7 +49,8 @@ export const exchangeToken = async () => {
       const currentUser = auth?.currentUser;
       if (!currentUser) return null;
 
-      const firebaseToken = await currentUser.getIdToken(true);
+      // Use Firebase's cached valid ID token instead of forcing a network refresh every time
+      const firebaseToken = await currentUser.getIdToken();
       let res;
       try {
         res = await axios.post(`${API_URL}/auth/token`, { firebaseToken }, { timeout: 30000 });
@@ -85,10 +116,15 @@ apiClient.interceptors.request.use(async (config) => {
   let token = getJWT();
   if ((!token || isTokenExpired(token)) && auth?.currentUser) {
     if (token && isTokenExpired(token)) clearJWT();
-    token = await exchangeToken();
+    // Do not block public endpoints on token exchange; trigger exchange in background instead
+    if (isPublicNoBlockPath(config.url)) {
+      void exchangeToken();
+    } else {
+      token = await exchangeToken();
+    }
   }
 
-  if (token) {
+  if (token && !isTokenExpired(token)) {
     config.headers.Authorization = `Bearer ${token}`;
   }
 
@@ -96,7 +132,13 @@ apiClient.interceptors.request.use(async (config) => {
 });
 
 axios.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    const method = (response.config?.method || "get").toLowerCase();
+    if (method !== "get" && response.config?.url) {
+      invalidateCacheForMutation(response.config.url);
+    }
+    return response;
+  },
   (error) => {
     if (error.response?.status === 403 && error.response?.data?.blocked) {
       if (typeof window !== "undefined") {
@@ -110,7 +152,13 @@ axios.interceptors.response.use(
 );
 
 apiClient.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    const method = (response.config?.method || "get").toLowerCase();
+    if (method !== "get" && response.config?.url) {
+      invalidateCacheForMutation(response.config.url);
+    }
+    return response;
+  },
   async (error) => {
     if (error.response?.status === 403 && error.response?.data?.blocked) {
       if (typeof window !== "undefined") {
@@ -130,7 +178,7 @@ apiClient.interceptors.response.use(
       original._coldRetryCount = original._coldRetryCount || 0;
       if (original._coldRetryCount < 3) {
         original._coldRetryCount += 1;
-        await new Promise((r) => setTimeout(r, 3000));
+        await new Promise((r) => setTimeout(r, 2500));
         return apiClient(original);
       }
     }
@@ -152,5 +200,75 @@ apiClient.interceptors.response.use(
     return Promise.reject(error);
   },
 );
+
+// ── Transparent Stale-While-Revalidate + In-Flight Deduplication on apiClient.get ──
+const rawGet = apiClient.get.bind(apiClient);
+const STALE_MAX_AGE_MS = 10 * 60 * 1000;
+
+apiClient.get = (url, config = {}) => {
+  if (shouldBypassFastCache(url, config)) {
+    return rawGet(url, config);
+  }
+
+  const {
+    forceRefresh = false,
+    swr = true,
+    freshMs,
+    onUpdate,
+    cache: _cacheFlag,
+    ...axiosConfig
+  } = config;
+
+  const cacheKey = buildFastCacheKey(url, axiosConfig.params);
+  const effectiveFreshMs = typeof freshMs === "number" ? freshMs : resolveFreshTtlMs(url);
+
+  const fetchAndCache = () =>
+    dedupeInFlight(cacheKey, async () => {
+      const response = await rawGet(url, axiosConfig);
+      if (response && response.data !== undefined) {
+        setCachedData(url, response.data, axiosConfig.params);
+      }
+      return response;
+    });
+
+  if (!forceRefresh) {
+    const entry = getFastCacheEntry(url, axiosConfig.params);
+    if (entry) {
+      const age = Date.now() - entry.ts;
+      if (age <= effectiveFreshMs) {
+        return Promise.resolve({
+          data: entry.data,
+          status: 200,
+          statusText: "OK (Cached)",
+          headers: {},
+          config: axiosConfig,
+          fromCache: true,
+        });
+      }
+      if (swr && age <= STALE_MAX_AGE_MS) {
+        // Return cached snapshot instantly (0ms), then silently update in background
+        void fetchAndCache()
+          .then((freshRes) => {
+            if (typeof onUpdate === "function" && freshRes?.data !== undefined) {
+              onUpdate(freshRes.data);
+            }
+          })
+          .catch(() => {});
+
+        return Promise.resolve({
+          data: entry.data,
+          status: 200,
+          statusText: "OK (Stale-While-Revalidate)",
+          headers: {},
+          config: axiosConfig,
+          fromCache: true,
+          stale: true,
+        });
+      }
+    }
+  }
+
+  return fetchAndCache();
+};
 
 export default apiClient;

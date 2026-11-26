@@ -2,21 +2,22 @@ import React, { useState, useEffect } from "react";
 import { Star, MessageSquare, Send, ShieldCheck, RefreshCw, ThumbsUp, Sparkles, User } from "lucide-react";
 import { toast } from "sonner";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 
 const StudioReviewsPage = () => {
-  const [reviews, setReviews] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [reviews, setReviews] = useState(() => getCachedData("/studio/reviews") || []);
+  const [loading, setLoading] = useState(() => !getCachedData("/studio/reviews"));
   const [replyTextMap, setReplyTextMap] = useState({});
   const [submittingId, setSubmittingId] = useState(null);
 
-  const fetchReviews = async () => {
-    setLoading(true);
+  const fetchReviews = async (forceRefresh = false) => {
+    if (!getCachedData("/studio/reviews") && !forceRefresh) setLoading(true);
     try {
-      const res = await apiClient.get("/studio/reviews");
+      const res = await apiClient.get("/studio/reviews", { forceRefresh });
       setReviews(res.data || []);
     } catch (err) {
       console.error("Fetch reviews error:", err);
-      toast.error("Could not fetch student reviews.");
+      if (!getCachedData("/studio/reviews")) toast.error("Could not fetch student reviews.");
     } finally {
       setLoading(false);
     }

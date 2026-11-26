@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import axios from "axios"; // used for public unauthenticated endpoints (ratings, courses)
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import {
   validateImageFile,
   uploadProfileImageToCloudinary,
@@ -198,17 +198,39 @@ const MyProfile = () => {
   // Prevents duplicate in-flight PATCH requests if the user clicks Save twice
   const updateAbortControllerRef = useRef(null);
 
-  const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const cachedProfile = useMemo(
+    () => (user?.email ? getCachedData(`/users?email=${encodeURIComponent(user.email)}`) || user?.dbUser || null : null),
+    [user?.email, user?.dbUser]
+  );
+  const cachedRating = useMemo(
+    () => (user?.email ? getCachedData(`/ratings/summary?targetEmail=${encodeURIComponent(user.email)}`) : null),
+    [user?.email]
+  );
+  const cachedPublicCourses = useMemo(() => getCachedData("/courses/public"), []);
+  const cachedEnrollments = useMemo(() => getCachedData("/courses/my-enrollments"), []);
+  const cachedElig = useMemo(() => getCachedData("/courses/eligibility"), []);
+
+  const [data, setData] = useState(() => cachedProfile);
+  const [loading, setLoading] = useState(() => !cachedProfile && Boolean(user?.email));
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [modalTab, setModalTab] = useState("basic");
   const [updating, setUpdating] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [ratingsSummary, setRatingsSummary] = useState({ averageRating: 5.0, totalRatings: 0 });
-  const [userCourses, setUserCourses] = useState([]);       // courses the user created as instructor
-  const [enrolledCourses, setEnrolledCourses] = useState([]); // courses the user purchased/enrolled in
+  const [ratingsSummary, setRatingsSummary] = useState(
+    () => cachedRating || { averageRating: 5.0, totalRatings: 0 }
+  );
+  const [userCourses, setUserCourses] = useState(() =>
+    Array.isArray(cachedPublicCourses) && user?.email
+      ? cachedPublicCourses.filter((c) => c.instructorEmail?.toLowerCase() === user.email.toLowerCase())
+      : []
+  );
+  const [enrolledCourses, setEnrolledCourses] = useState(() =>
+    Array.isArray(cachedEnrollments) ? cachedEnrollments : []
+  );
   const [activeTab, setActiveTab] = useState("overview");
-  const [canCreateCourse, setCanCreateCourse] = useState(false);
+  const [canCreateCourse, setCanCreateCourse] = useState(() =>
+    Boolean(cachedElig?.canCreateCourse || user?.canCreateCourse)
+  );
 
   // Profile Image Upload State
   const [photoPreview, setPhotoPreview] = useState("");
@@ -375,44 +397,31 @@ const MyProfile = () => {
 
   const fetchExtraData = useCallback(async () => {
     if (!user?.email) return;
-    try {
-      const ratRes = await axios.get(`${API_URL}/ratings/summary?targetEmail=${encodeURIComponent(user.email)}`);
-      if (ratRes.data) {
-        setRatingsSummary({
-          averageRating: ratRes.data.averageRating || 5.0,
-          totalRatings: ratRes.data.totalRatings || 0,
-        });
-      }
-    } catch {
-      // silent fallback
-    }
+    const emailLower = user.email.toLowerCase();
+    const [ratRes, cRes, enrollRes, eligRes] = await Promise.all([
+      apiClient
+        .get(`/ratings/summary?targetEmail=${encodeURIComponent(user.email)}`)
+        .catch(() => ({ data: null })),
+      apiClient.get("/courses/public").catch(() => ({ data: null })),
+      apiClient.get("/courses/my-enrollments").catch(() => ({ data: null })),
+      apiClient.get("/courses/eligibility").catch(() => ({ data: null })),
+    ]);
 
-    try {
-      const cRes = await axios.get(`${API_URL}/courses/public`);
-      if (Array.isArray(cRes.data)) {
-        const mine = cRes.data.filter((c) => c.instructorEmail?.toLowerCase() === user.email.toLowerCase());
-        setUserCourses(mine);
-      }
-    } catch {
-      // silent fallback
+    if (ratRes.data) {
+      setRatingsSummary({
+        averageRating: ratRes.data.averageRating || 5.0,
+        totalRatings: ratRes.data.totalRatings || 0,
+      });
     }
-
-    // Fetch courses the user has enrolled in (purchased)
-    try {
-      const enrollRes = await apiClient.get("/courses/my-enrollments");
-      if (Array.isArray(enrollRes.data)) {
-        setEnrolledCourses(enrollRes.data);
-      }
-    } catch {
-      // silent fallback — enrolled courses section stays empty
+    if (Array.isArray(cRes.data)) {
+      const mine = cRes.data.filter((c) => c.instructorEmail?.toLowerCase() === emailLower);
+      setUserCourses(mine);
     }
-
-    // Check course creation / studio eligibility
-    try {
-      const eligRes = await apiClient.get("/courses/eligibility");
+    if (Array.isArray(enrollRes.data)) {
+      setEnrolledCourses(enrollRes.data);
+    }
+    if (eligRes.data) {
       setCanCreateCourse(Boolean(eligRes.data?.canCreateCourse));
-    } catch {
-      setCanCreateCourse(false);
     }
   }, [user?.email]);
 

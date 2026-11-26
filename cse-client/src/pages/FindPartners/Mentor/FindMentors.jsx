@@ -16,8 +16,8 @@ import {
   ShieldCheck,
   Compass,
 } from "lucide-react";
-import axios from "axios";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import { toast } from "@/components/ui/toast-system";
 import { ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
 import useAuth from "@/hooks/useAuth";
@@ -47,11 +47,15 @@ const HYBRID_SUGGESTIONS = [
 
 const FindMentors = () => {
   const { user } = useAuth();
-  const [mentors, setMentors] = useState([]);
+  const initialMentors = useMemo(
+    () => (user?.email ? getCachedData(`/find-mentors?email=${encodeURIComponent(user.email)}`) : null),
+    [user?.email]
+  );
+  const [mentors, setMentors] = useState(() => initialMentors || []);
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedLevel, setSelectedLevel] = useState("all");
   const [sortBy, setSortBy] = useState("match"); // "match" | "rating" | "skills" | "name"
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !initialMentors);
 
   // Hybrid Vector Retrieval State
   const [searchMode, setSearchMode] = useState("keyword"); // "keyword" | "hybrid"
@@ -81,24 +85,28 @@ const FindMentors = () => {
     }
   };
 
-  const fetchMentors = async () => {
+  const fetchMentors = async (forceRefresh = false) => {
     if (!user?.email) return;
+    const url = `/find-mentors?email=${encodeURIComponent(user.email)}`;
+    if (!getCachedData(url) && !forceRefresh) {
+      setLoading(true);
+    }
 
     try {
-      setLoading(true);
-      const res = await axios.get(
-        `${import.meta.env.VITE_API_URL}/find-mentors?email=${user.email}`
-      );
+      const res = await apiClient.get(url, {
+        forceRefresh,
+        onUpdate: (fresh) => Array.isArray(fresh) && setMentors(fresh),
+      });
       setMentors(res.data || []);
     } catch (error) {
-      setMentors([]);
+      if (!getCachedData(url)) setMentors([]);
     } finally {
       setLoading(false);
     }
   };
 
   useEffect(() => {
-    fetchMentors();
+    fetchMentors(false);
   }, [user?.email]);
 
   useEffect(() => {
@@ -107,7 +115,7 @@ const FindMentors = () => {
     if (!socket.connected) socket.connect();
     socket.emit("presence:join", { email: user.email });
 
-    const onConnectionsUpdated = () => fetchMentors();
+    const onConnectionsUpdated = () => fetchMentors(true);
     socket.on("connections:updated", onConnectionsUpdated);
     return () => {
       socket.off("connections:updated", onConnectionsUpdated);

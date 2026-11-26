@@ -15,6 +15,7 @@ import {
   ShieldAlert,
 } from "lucide-react";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import { formatBDT } from "@/lib/money";
 import { FullScreenLoader } from "@/components/shared/loading/LoadingSpinner";
 import InvoiceModal from "@/components/courses/InvoiceModal";
@@ -30,24 +31,31 @@ const PLACEHOLDER =
  */
 const MyPurchasesPage = () => {
   const navigate = useNavigate();
-  const [summary, setSummary] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [summary, setSummary] = useState(() => getCachedData("/courses/my-purchases"));
+  const [loading, setLoading] = useState(() => !getCachedData("/courses/my-purchases"));
   const [search, setSearch] = useState("");
   const [activeInvoiceId, setActiveInvoiceId] = useState(null);
   const [activeCertCourse, setActiveCertCourse] = useState(null);
 
-  const loadPurchases = useCallback(async () => {
-    setLoading(true);
+  const loadPurchases = useCallback(async (forceRefresh = false) => {
+    if (!getCachedData("/courses/my-purchases") || forceRefresh) {
+      if (!getCachedData("/courses/my-purchases")) setLoading(true);
+    }
     try {
-      const res = await apiClient.get("/courses/my-purchases");
+      const res = await apiClient.get("/courses/my-purchases", {
+        forceRefresh,
+        onUpdate: (fresh) => fresh && setSummary(fresh),
+      });
       setSummary(res.data);
     } catch {
-      setSummary({
-        totalPurchases: 0,
-        activeCourses: 0,
-        totalSpent: 0,
-        purchases: [],
-      });
+      if (!getCachedData("/courses/my-purchases")) {
+        setSummary({
+          totalPurchases: 0,
+          activeCourses: 0,
+          totalSpent: 0,
+          purchases: [],
+        });
+      }
     } finally {
       setLoading(false);
     }

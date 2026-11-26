@@ -14,7 +14,8 @@ import {
   Users,
   ShieldCheck,
 } from "lucide-react";
-import axios from "axios";
+import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import Swal from "sweetalert2";
 import { toast } from "sonner";
 import useAuth from "@/hooks/useAuth";
@@ -32,20 +33,29 @@ const ExpertDetail = () => {
   const navigate = useNavigate();
   const { user: authUser } = useAuth();
 
-  const [expertData, setExpertData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const viewerParam = authUser?.email ? `?viewerEmail=${encodeURIComponent(authUser.email)}` : "";
+  const expertUrl = id ? `/experts/${id}${viewerParam}` : "";
+  const initialExpert = expertUrl ? getCachedData(expertUrl)?.data || null : null;
+
+  const [expertData, setExpertData] = useState(() => initialExpert);
+  const [loading, setLoading] = useState(() => !initialExpert);
   const [error, setError] = useState(null);
 
-  const fetchExpert = useCallback(async () => {
+  const fetchExpert = useCallback(async (forceRefresh = false) => {
     if (!id) return;
+    const url = `/experts/${id}${authUser?.email ? `?viewerEmail=${encodeURIComponent(authUser.email)}` : ""}`;
+    if (!getCachedData(url)?.data && !forceRefresh) {
+      setLoading(true);
+    }
 
     try {
-      setLoading(true);
       setError(null);
-      const viewerParam = authUser?.email ? `?viewerEmail=${encodeURIComponent(authUser.email)}` : "";
-      const res = await axios.get(
-        `${import.meta.env.VITE_API_URL}/experts/${id}${viewerParam}`
-      );
+      const res = await apiClient.get(url, {
+        forceRefresh,
+        onUpdate: (fresh) => {
+          if (fresh?.success && fresh?.data) setExpertData(fresh.data);
+        },
+      });
 
       if (res.data?.success && res.data?.data) {
         setExpertData(res.data.data);
@@ -54,8 +64,10 @@ const ExpertDetail = () => {
       }
     } catch (err) {
       console.error("Error fetching expert profile:", err);
-      const msg = err.response?.data?.message || "Expert profile not found or server error.";
-      setError(msg);
+      if (!getCachedData(url)?.data) {
+        const msg = err.response?.data?.message || "Expert profile not found or server error.";
+        setError(msg);
+      }
     } finally {
       setLoading(false);
     }
@@ -95,7 +107,7 @@ const ExpertDetail = () => {
     if (!result.isConfirmed) return;
 
     try {
-      await axios.post(`${import.meta.env.VITE_API_URL}/ratings`, {
+      await apiClient.post("/ratings", {
         reviewerEmail: authUser.email,
         targetEmail,
         rating: result.value.rating,

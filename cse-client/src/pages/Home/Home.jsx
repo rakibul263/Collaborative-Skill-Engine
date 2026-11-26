@@ -10,13 +10,12 @@ import {
   Layers, Lock, CheckCircle2, Flame, Bot, CornerDownRight,
   User,
 } from "lucide-react";
-import axios from "axios";
+import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import { useNavigate } from "react-router";
 import useAuth from "@/hooks/useAuth";
 
 gsap.registerPlugin(ScrollTrigger);
-
-const API = import.meta.env.VITE_API_URL || "http://localhost:3000";
 
 /* ─────────────────────────────────────────────
    ANIMATED COUNTER
@@ -142,15 +141,22 @@ const Home = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const [stats, setStats] = useState({ totalUsers: 0, totalMessages: 0, experts: [] });
-  const [statsLoaded, setStatsLoaded] = useState(false);
+  const [stats, setStats] = useState(
+    () => getCachedData("/platform-stats") || { totalUsers: 0, totalMessages: 0, experts: [] }
+  );
+  const [statsLoaded, setStatsLoaded] = useState(() => Boolean(getCachedData("/platform-stats")));
 
   useEffect(() => {
     let active = true;
     let retryTimer = null;
     const loadStats = (attempt = 0) => {
-      axios
-        .get(`${API}/platform-stats`, { timeout: 65000 })
+      apiClient
+        .get("/platform-stats", {
+          timeout: 65000,
+          onUpdate: (fresh) => {
+            if (active && fresh) setStats(fresh);
+          },
+        })
         .then((r) => {
           if (!active) return;
           setStats(r.data || {});

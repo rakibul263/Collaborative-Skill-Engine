@@ -1,3 +1,5 @@
+import { prefetchPublicBaseline } from "./prefetchManager";
+
 const API_URL = (import.meta.env.VITE_API_URL || "http://localhost:3000").replace(/\/+$/, "");
 
 let started = false;
@@ -45,8 +47,10 @@ export const initServerWarmup = () => {
   if (typeof window === "undefined" || started) return;
   started = true;
 
-  // 1. Immediate wake-up hit as soon as the app loads
-  void wakeUntilReady();
+  // 1. Immediate wake-up hit as soon as the app loads + background baseline prefetch
+  void wakeUntilReady().then((ready) => {
+    if (ready) prefetchPublicBaseline();
+  });
 
   // 2. Keep backend warm while tab stays visible (skips rate limiter via /health)
   setInterval(() => {

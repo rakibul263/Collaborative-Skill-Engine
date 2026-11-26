@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import useAuth from "@/hooks/useAuth";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import { extractYouTubeId } from "@/lib/youtube";
 import { formatBDT, resolveCoursePrice } from "@/lib/money";
 import ProtectedVideoPlayer from "@/components/courses/ProtectedVideoPlayer";
@@ -69,32 +70,49 @@ const CourseDetail = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
 
-  const [course, setCourse] = useState(null);
-  const [lessons, setLessons] = useState([]);
-  const [canWatchAll, setCanWatchAll] = useState(false);
-  const [serverProgress, setServerProgress] = useState(null);
+  const initialCourse = useMemo(() => {
+    const direct = getCachedData(`/courses/public/${id}`);
+    if (direct) return direct;
+    const list = getCachedData("/courses/public");
+    return Array.isArray(list) ? list.find((c) => c._id === id) || null : null;
+  }, [id]);
+  const initialLessonsData = useMemo(() => getCachedData(`/courses/public/${id}/lessons`), [id]);
+  const initialEnrollData = useMemo(() => getCachedData(`/courses/${id}/enrollment`), [id]);
+
+  const [course, setCourse] = useState(() => initialCourse);
+  const [lessons, setLessons] = useState(() => initialLessonsData?.lessons || []);
+  const [canWatchAll, setCanWatchAll] = useState(() => Boolean(initialLessonsData?.canWatchAll));
+  const [serverProgress, setServerProgress] = useState(() => initialLessonsData?.courseProgress || null);
   const [localProgress, setLocalProgress] = useState({});
 
-  const [activeLessonId, setActiveLessonId] = useState(null);
+  const [activeLessonId, setActiveLessonId] = useState(() => {
+    const list = initialLessonsData?.lessons || [];
+    const first = list.find((l) => !l.locked && getLessonVideos(l).some((v) => v.embedId));
+    return first?._id || null;
+  });
   const [activePartIndex, setActivePartIndex] = useState(0);
-  const [expandedLessonIds, setExpandedLessonIds] = useState([]);
+  const [expandedLessonIds, setExpandedLessonIds] = useState(() => {
+    const list = initialLessonsData?.lessons || [];
+    const first = list.find((l) => !l.locked && getLessonVideos(l).some((v) => v.embedId));
+    return first?._id ? [first._id] : list[0]?._id ? [list[0]._id] : [];
+  });
 
   const [pdfModalState, setPdfModalState] = useState({ open: false, pdfs: [], index: 0, title: "" });
-  const [enrolled, setEnrolled] = useState(false);
-  const [enrollmentMeta, setEnrollmentMeta] = useState(null);
+  const [enrolled, setEnrolled] = useState(() => Boolean(initialEnrollData?.enrolled));
+  const [enrollmentMeta, setEnrollmentMeta] = useState(() => initialEnrollData || null);
   const [invoiceOpen, setInvoiceOpen] = useState(false);
-  const [certificateState, setCertificateState] = useState(null);
+  const [certificateState, setCertificateState] = useState(() => initialLessonsData?.certificate || null);
   const [certExpanded, setCertExpanded] = useState(false);
   const [certModalOpen, setCertModalOpen] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(() => !initialCourse);
   const [error, setError] = useState("");
   const [enrolling, setEnrolling] = useState(false);
 
-  const loadCourseLessons = useCallback(async () => {
+  const loadCourseLessons = useCallback(async (forceRefresh = false) => {
     try {
       let lessonsRes;
       try {
-        lessonsRes = await apiClient.get(`/courses/public/${id}/lessons`);
+        lessonsRes = await apiClient.get(`/courses/public/${id}/lessons`, { forceRefresh });
       } catch {
         lessonsRes = await axios.get(`${API}/courses/public/${id}/lessons`);
       }
@@ -125,36 +143,45 @@ const CourseDetail = () => {
   }, [id]);
 
   useEffect(() => {
+    let active = true;
     const fetchCourse = async () => {
-      setLoading(true);
+      if (!getCachedData(`/courses/public/${id}`) && !initialCourse) {
+        setLoading(true);
+      }
       setError("");
       try {
-        let res;
-        try {
-          res = await apiClient.get(`/courses/public/${id}`);
-        } catch {
-          res = await axios.get(`${API}/courses/public/${id}`);
-        }
-        setCourse(res.data);
+        const coursePromise = apiClient
+          .get(`/courses/public/${id}`, {
+            onUpdate: (fresh) => active && fresh && setCourse(fresh),
+          })
+          .catch(() => axios.get(`${API}/courses/public/${id}`));
 
-        await loadCourseLessons();
+        const enrollPromise = user
+          ? apiClient.get(`/courses/${id}/enrollment`).catch(() => ({ data: { enrolled: false } }))
+          : Promise.resolve({ data: { enrolled: false } });
 
+        const [courseRes, , enrollRes] = await Promise.all([
+          coursePromise,
+          loadCourseLessons(),
+          enrollPromise,
+        ]);
+
+        if (!active) return;
+        setCourse(courseRes.data);
         if (user) {
-          try {
-            const enrollRes = await apiClient.get(`/courses/${id}/enrollment`);
-            setEnrolled(enrollRes.data?.enrolled || false);
-            setEnrollmentMeta(enrollRes.data || null);
-          } catch {
-            /* not enrolled */
-          }
+          setEnrolled(enrollRes.data?.enrolled || false);
+          setEnrollmentMeta(enrollRes.data || null);
         }
       } catch {
-        setError("Course not found or no longer available.");
+        if (active && !course) setError("Course not found or no longer available.");
       } finally {
-        setLoading(false);
+        if (active) setLoading(false);
       }
     };
     fetchCourse();
+    return () => {
+      active = false;
+    };
   }, [id, user, loadCourseLessons]);
 
   // Handle return from Stripe Checkout (success or cancel)

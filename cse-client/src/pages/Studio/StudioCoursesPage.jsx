@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { useOutletContext, useNavigate } from "react-router-dom";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import CourseEditorModal from "@/components/studio/CourseEditorModal";
 import { toast } from "@/components/ui/toast-system";
 import { formatBDT } from "@/lib/money";
@@ -23,18 +24,18 @@ const StudioCoursesPage = () => {
   const { eligibleTopics = [], refreshStudioData } = useOutletContext() || {};
   const navigate = useNavigate();
 
-  const [courses, setCourses] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [courses, setCourses] = useState(() => getCachedData("/courses/mine") || []);
+  const [loading, setLoading] = useState(() => !getCachedData("/courses/mine"));
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
 
   const [showModal, setShowModal] = useState(false);
   const [selectedCourse, setSelectedCourse] = useState(null);
 
-  const fetchCourses = useCallback(async () => {
-    setLoading(true);
+  const fetchCourses = useCallback(async (forceRefresh = false) => {
+    if (!getCachedData("/courses/mine") && !forceRefresh) setLoading(true);
     try {
-      const res = await apiClient.get("/courses/mine");
+      const res = await apiClient.get("/courses/mine", { forceRefresh });
       setCourses(res.data || []);
     } catch (err) {
       console.error("Fetch courses error:", err);

@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { useOutletContext, useNavigate } from "react-router-dom";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import CourseEditorModal from "@/components/studio/CourseEditorModal";
 import useAuth from "@/hooks/useAuth";
 import { formatBDT } from "@/lib/money";
@@ -28,18 +29,21 @@ const StudioDashboardPage = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const [analytics, setAnalytics] = useState(null);
-  const [courses, setCourses] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [analytics, setAnalytics] = useState(() => getCachedData("/studio/analytics"));
+  const [courses, setCourses] = useState(() => getCachedData("/courses/mine") || []);
+  const [loading, setLoading] = useState(
+    () => !(getCachedData("/studio/analytics") && getCachedData("/courses/mine"))
+  );
   const [showCourseModal, setShowCourseModal] = useState(false);
   const [activeCourseFilter, setActiveCourseFilter] = useState("all");
 
-  const fetchDashboardData = useCallback(async () => {
-    setLoading(true);
+  const fetchDashboardData = useCallback(async (forceRefresh = false) => {
+    const hasWarm = Boolean(getCachedData("/studio/analytics") && getCachedData("/courses/mine"));
+    if (!hasWarm && !forceRefresh) setLoading(true);
     try {
       const [analyticsRes, coursesRes] = await Promise.all([
-        apiClient.get("/studio/analytics").catch(() => ({ data: null })),
-        apiClient.get("/courses/mine").catch(() => ({ data: [] })),
+        apiClient.get("/studio/analytics", { forceRefresh }).catch(() => ({ data: null })),
+        apiClient.get("/courses/mine", { forceRefresh }).catch(() => ({ data: [] })),
       ]);
       setAnalytics(analyticsRes.data);
       setCourses(coursesRes.data || []);

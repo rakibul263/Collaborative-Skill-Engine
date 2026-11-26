@@ -2,24 +2,25 @@ import React, { useState, useEffect } from "react";
 import { Tag, Plus, Check, RefreshCw, Calendar, Users, Copy, Sparkles, Percent, Ticket } from "lucide-react";
 import { toast } from "sonner";
 import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 
 const StudioCouponsPage = () => {
-  const [coupons, setCoupons] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const [coupons, setCoupons] = useState(() => getCachedData("/studio/coupons") || []);
+  const [loading, setLoading] = useState(() => !getCachedData("/studio/coupons"));
 
   const [code, setCode] = useState("");
   const [discountPercent, setDiscountPercent] = useState(20);
   const [maxUses, setMaxUses] = useState(100);
   const [copiedId, setCopiedId] = useState(null);
 
-  const fetchCoupons = async () => {
-    setLoading(true);
+  const fetchCoupons = async (forceRefresh = false) => {
+    if (!getCachedData("/studio/coupons") && !forceRefresh) setLoading(true);
     try {
-      const res = await apiClient.get("/studio/coupons");
+      const res = await apiClient.get("/studio/coupons", { forceRefresh });
       setCoupons(res.data || []);
     } catch (err) {
       console.error("Fetch coupons error:", err);
-      toast.error("Could not fetch coupons.");
+      if (!getCachedData("/studio/coupons")) toast.error("Could not fetch coupons.");
     } finally {
       setLoading(false);
     }

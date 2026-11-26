@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { User, LayoutDashboard, LogOut, ChevronDown, Sparkles, Shield, Compass, PlusCircle, Receipt } from "lucide-react";
 import { NavLink } from "react-router";
 import { withCacheBust } from "@/lib/profileApi";
+import { prefetchRoute } from "@/lib/prefetchManager";
 
 const UserProfileDropdown = ({ user, handleLogOut, isDashboardEligible }) => {
   const [isOpen, setIsOpen] = useState(false);
@@ -30,6 +31,11 @@ const UserProfileDropdown = ({ user, handleLogOut, isDashboardEligible }) => {
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setIsOpen((prev) => !prev)}
+        onMouseEnter={() => {
+          prefetchRoute("/profile", user?.email);
+          prefetchRoute("/my-purchases", user?.email);
+          if (isDashboardEligible) prefetchRoute("/studio/dashboard", user?.email);
+        }}
         className="flex items-center gap-2 p-1 rounded-full border border-slate-700 hover:border-indigo-500/60 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500 bg-slate-800/80 shadow-xs group"
         aria-label="User profile menu"
         aria-expanded={isOpen}

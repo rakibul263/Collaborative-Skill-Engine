@@ -11,19 +11,24 @@ import {
   Award,
 } from "lucide-react";
 import { formatBDT, resolveCoursePrice } from "@/lib/money";
+import { prefetchRoute } from "@/lib/prefetchManager";
+import useAuth from "@/hooks/useAuth";
 
 const PLACEHOLDER = "https://images.unsplash.com/photo-1516321318423-f06f85e504b3?q=80&w=800&auto=format&fit=crop";
 
   const CourseMarketplaceCard = ({ course, isEnrolled = false }) => {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   const lessonsCount = Array.isArray(course.curriculum) ? course.curriculum.length : 0;
   const price = resolveCoursePrice(course);
+  const targetRoute = isEnrolled ? `/learn/${course._id}` : `/courses/${course._id}`;
 
   return (
     <motion.div
       whileHover={{ y: -6 }}
-      onClick={() => navigate(isEnrolled ? `/learn/${course._id}` : `/courses/${course._id}`)}
+      onMouseEnter={() => prefetchRoute(targetRoute, user?.email)}
+      onClick={() => navigate(targetRoute)}
       className="bg-slate-900/70 border border-slate-800/90 hover:border-indigo-500/50 rounded-2xl overflow-hidden backdrop-blur-2xl cursor-pointer group transition-all duration-300 flex flex-col justify-between shadow-xl hover:shadow-indigo-500/10"
     >
       <div>
