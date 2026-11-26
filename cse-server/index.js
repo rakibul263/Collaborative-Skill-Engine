@@ -239,7 +239,9 @@ async function run() {
       { unique: true },
     );
     await conversationsCollection.createIndex({ participants: 1 });
+    await conversationsCollection.createIndex({ participants: 1, lastMessageAt: -1 });
     await messagesCollection.createIndex({ conversationId: 1, createdAt: 1 });
+    await messagesCollection.createIndex({ conversationId: 1, createdAt: -1 });
     await messagesCollection.createIndex({ receiverEmail: 1, seenAt: 1 });
     await ratingsCollection.createIndex(
       { reviewerEmail: 1, targetEmail: 1 },
@@ -1953,18 +1955,26 @@ async function run() {
       }
 
       try {
-        const emailRegex = new RegExp(`^${escapeRegex(authEmail)}$`, "i");
-
-        let conversations = await conversationsCollection
-          .find({ participants: { $regex: emailRegex } })
-          .sort({ lastMessageAt: -1, updatedAt: -1 })
-          .toArray();
-
-        // Ensure every accepted connection without an existing 1-on-1 thread gets a conversation
         const viewerDoc = await findUserByEmail(usersCollection, authEmail, {
           projection: { email: 1, connections: 1 },
         });
         const viewerEmail = viewerDoc?.email || authEmail;
+        const emailVariants = Array.from(new Set([authEmail, queryEmail, viewerEmail].filter(Boolean)));
+        const emailRegex = new RegExp(`^${escapeRegex(authEmail)}$`, "i");
+
+        // Use indexed $in first for fast lookup; fallback to regex only if nothing matched
+        let conversations = await conversationsCollection
+          .find({ participants: { $in: emailVariants } })
+          .sort({ lastMessageAt: -1, updatedAt: -1 })
+          .toArray();
+
+        if (conversations.length === 0) {
+          conversations = await conversationsCollection
+            .find({ participants: { $regex: emailRegex } })
+            .sort({ lastMessageAt: -1, updatedAt: -1 })
+            .toArray();
+        }
+
         const connections = Array.isArray(viewerDoc?.connections) ? viewerDoc.connections : [];
 
         if (connections.length > 0) {

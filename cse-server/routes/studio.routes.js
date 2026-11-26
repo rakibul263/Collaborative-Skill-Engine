@@ -35,7 +35,24 @@ const registerStudioRoutes = (app, {
     const escaped = escapeRegex(email);
     const userDoc = await usersCollection.findOne({ email: new RegExp(`^${escaped}$`, "i") });
     if (!userDoc) {
-      throw new Error("User not found");
+      return {
+        hasStudioAccess: false,
+        isEligible: false,
+        hasSignature: false,
+        instructorSignature: null,
+        signatureUpdatedAt: null,
+        meetsOriginalMentorshipCriteria: false,
+        progressPercent: 0,
+        fulfilledCount: 0,
+        totalCount: 4,
+        completion: 0,
+        canCreateCourse: false,
+        requirements: [],
+        profileRequirements: [],
+        eligibleTopics: ["Software Architecture", "Full-Stack Web Development"],
+        allCompletedTopics: [],
+        metrics: { averageRating: 0, ratingCount: 0, sessionCount: 0, profileCompletionPercent: 0, certificatesCount: 0 },
+      };
     }
 
     // 1. Calculate profile completion score using centralized utility

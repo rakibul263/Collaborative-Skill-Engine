@@ -1,43 +1,39 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import apiClient from "@/lib/apiClient";
-import { useLocation } from "react-router";
-import useAuth from "@/hooks/useAuth";
-import { showConfirm } from "@/components/ui/confirm-dialog";
-import { toast } from "@/components/ui/toast-system";
-import { ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
-import { motion, AnimatePresence } from "framer-motion";
-import {
-  Send,
-  MessageSquare,
-  Clock,
-  Check,
-  CheckCheck,
-  Edit2,
-  Trash2,
-  Image,
-  X,
-  Calendar,
-  Search,
-  ArrowLeft,
-  Sparkles,
-  User,
-  Copy,
-  Paperclip,
-  Loader2,
-  Shield,
-  Zap,
-  Palette,
-  Users,
-  Video,
-} from "lucide-react";
-import { getSocket } from "@/lib/socket";
-import { playNotificationSound } from "@/lib/notificationSound";
-import ScheduleModal from "@/components/shared/schedule/ScheduleModal";
-import ScheduleCard from "@/components/shared/schedule/ScheduleCard";
-import ScheduleBanner from "@/components/shared/schedule/ScheduleBanner";
-import VideoCallOverlay from "@/components/shared/video/VideoCallOverlay";
 import ChatWallpaperBg from "@/components/shared/chat/ChatWallpaperBg";
 import { CHAT_WALLPAPER_THEMES } from "@/components/shared/chat/chatThemes";
+import { ButtonSpinner } from "@/components/shared/loading/LoadingSpinner";
+import ScheduleBanner from "@/components/shared/schedule/ScheduleBanner";
+import ScheduleCard from "@/components/shared/schedule/ScheduleCard";
+import ScheduleModal from "@/components/shared/schedule/ScheduleModal";
+import VideoCallOverlay from "@/components/shared/video/VideoCallOverlay";
+import { showConfirm } from "@/components/ui/confirm-dialog";
+import { toast } from "@/components/ui/toast-system";
+import useAuth from "@/hooks/useAuth";
+import apiClient from "@/lib/apiClient";
+import { playNotificationSound } from "@/lib/notificationSound";
+import { getSocket } from "@/lib/socket";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+    ArrowLeft,
+    Calendar,
+    Check,
+    CheckCheck,
+    Clock,
+    Copy,
+    Edit2,
+    Image,
+    Loader2,
+    MessageSquare,
+    Palette,
+    Search,
+    Send,
+    Sparkles,
+    Trash2,
+    Users,
+    Video,
+    X
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useLocation } from "react-router";
 
 /* ─── Skeleton Component for Conversations List ─── */
 const ConversationSkeleton = () => (
@@ -314,9 +310,11 @@ const Message = () => {
   }, []);
 
   const convRetryTimerRef = useRef(null);
+  const lastConvFetchAtRef = useRef(0);
 
   const fetchConversations = useCallback(async () => {
     if (!user?.email) return;
+    lastConvFetchAtRef.current = Date.now();
     const emailKey = user.email.toLowerCase().trim();
     const cacheKey = `cse_convs_${emailKey}`;
 
@@ -426,15 +424,34 @@ const Message = () => {
   const fetchConversationContent = useCallback(
     async (conversationId) => {
       if (!conversationId || !user?.email) return;
+      const msgCacheKey = `cse_msgs_${conversationId}`;
+      let hadCache = false;
       try {
-        setLoadingMessages(true);
-        // Execute both requests concurrently with Promise.all to guarantee 0 race conditions
+        const cached = sessionStorage.getItem(msgCacheKey);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (Array.isArray(parsed.messages)) {
+            setMessages(parsed.messages);
+            if (Array.isArray(parsed.schedules)) setSchedules(parsed.schedules);
+            setLoadingMessages(false);
+            hadCache = true;
+          }
+        }
+      } catch {
+        // ignore invalid cache
+      }
+
+      try {
+        if (!hadCache) setLoadingMessages(true);
+        // Fetch latest 40 messages + schedules concurrently for crisp load speed
         const [messagesRes, schedulesRes] = await Promise.all([
           apiClient.get(
-            `/conversations/${conversationId}/messages?requesterEmail=${user.email}`
+            `/conversations/${conversationId}/messages?requesterEmail=${encodeURIComponent(user.email)}&limit=40`,
+            { timeout: 60000 }
           ),
           apiClient.get(
-            `/conversations/${conversationId}/schedules?requesterEmail=${user.email}`
+            `/conversations/${conversationId}/schedules?requesterEmail=${encodeURIComponent(user.email)}`,
+            { timeout: 60000 }
           ).catch(() => ({ data: [] })),
         ]);
 
@@ -456,12 +473,26 @@ const Message = () => {
         );
 
         setMessages(combined);
+        setError("");
+        try {
+          // Cache lightweight snapshot (skip oversized base64 blobs to fit quota)
+          const lightMsgs = combined.map((m) =>
+            m.imageData && m.imageData.length > 50000 ? { ...m, imageData: "" } : m
+          );
+          sessionStorage.setItem(
+            msgCacheKey,
+            JSON.stringify({ messages: lightMsgs.slice(-30), schedules: fetchedSchedules })
+          );
+        } catch {
+          // ignore storage quota errors
+        }
 
-        await apiClient.patch(`/conversations/${conversationId}/seen`, {
+        // Mark seen non-blocking so message UI renders immediately
+        apiClient.patch(`/conversations/${conversationId}/seen`, {
           viewerEmail: user.email,
         }).catch(() => {});
       } catch {
-        setError("Failed to load conversation history.");
+        if (!hadCache) setError("Failed to load conversation history.");
       } finally {
         setLoadingMessages(false);
       }
@@ -816,7 +847,9 @@ const Message = () => {
 
     const onConnect = () => {
       socket.emit("presence:join", { email: user.email });
-      fetchConversations();
+      if (Date.now() - lastConvFetchAtRef.current > 5000) {
+        fetchConversations();
+      }
     };
     socket.on("connect", onConnect);
 
