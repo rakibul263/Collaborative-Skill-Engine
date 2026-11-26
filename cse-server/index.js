@@ -62,14 +62,31 @@ const deleteCloudinaryImage = async (publicId, resourceType = "image") => {
 };
 
 const app = express();
+app.set("trust proxy", 1);
 const httpServer = createServer(app);
 const port = process.env.PORT || 3000;
-const allowedOrigins = process.env.ALLOWED_ORIGINS
-  ? process.env.ALLOWED_ORIGINS.split(",").map((o) => o.trim())
-  : ["http://localhost:5173"];
+
+const normalizeOrigin = (url = "") => String(url).trim().replace(/\/+$/, "");
+const allowedOrigins = Array.from(
+  new Set(
+    [
+      ...(process.env.ALLOWED_ORIGINS
+        ? process.env.ALLOWED_ORIGINS.split(",").map(normalizeOrigin)
+        : ["http://localhost:5173"]),
+      process.env.CLIENT_URL ? normalizeOrigin(process.env.CLIENT_URL) : "",
+    ].filter(Boolean)
+  )
+);
 
 const corsConfig = {
-  origin: allowedOrigins,
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    const clean = normalizeOrigin(origin);
+    if (allowedOrigins.includes(clean)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
   credentials: true,
 };
 
