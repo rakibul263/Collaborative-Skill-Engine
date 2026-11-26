@@ -305,6 +305,10 @@ const Login = () => {
                     if (error.code === "auth/popup-closed-by-user" || error.code === "auth/cancelled-popup-request") {
                       return; // User closed popup — no error needed
                     }
+                    if (error.code === "auth/popup-blocked") {
+                      toast.error("Browser blocked the Google popup. Please allow popups in your browser address bar and try again.");
+                      return;
+                    }
                     console.error("[Google Sign-in Error]", error.code, error.message);
                     toast.error(error.message || "Could not sign in with Google.");
                   }

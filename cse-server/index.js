@@ -1955,7 +1955,12 @@ async function run() {
       try {
         const emailRegex = new RegExp(`^${escapeRegex(authEmail)}$`, "i");
 
-        // Ensure every accepted connection also has a conversation thread ready
+        let conversations = await conversationsCollection
+          .find({ participants: { $regex: emailRegex } })
+          .sort({ lastMessageAt: -1, updatedAt: -1 })
+          .toArray();
+
+        // Ensure every accepted connection without an existing 1-on-1 thread gets a conversation
         const viewerDoc = await findUserByEmail(usersCollection, authEmail, {
           projection: { email: 1, connections: 1 },
         });
@@ -1963,11 +1968,22 @@ async function run() {
         const connections = Array.isArray(viewerDoc?.connections) ? viewerDoc.connections : [];
 
         if (connections.length > 0) {
-          const now = new Date().toISOString();
-          await Promise.all(
-            connections
-              .filter((c) => c?.email && c.email.toLowerCase().trim() !== authEmail)
-              .map((c) => {
+          const existingPeerSet = new Set(
+            conversations
+              .filter((c) => !c.isGroup)
+              .flatMap((c) =>
+                (c.participants || []).map((p) => String(p || "").trim().toLowerCase())
+              )
+          );
+          const missingConnections = connections.filter((c) => {
+            const em = String(c?.email || "").trim().toLowerCase();
+            return em && em !== authEmail && !existingPeerSet.has(em);
+          });
+
+          if (missingConnections.length > 0) {
+            const now = new Date().toISOString();
+            await Promise.all(
+              missingConnections.map((c) => {
                 const peerClean = String(c.email).trim();
                 const participantsKey = getParticipantsKey(viewerEmail, peerClean);
                 return conversationsCollection.updateOne(
@@ -1984,13 +2000,14 @@ async function run() {
                   { upsert: true }
                 );
               })
-          );
-        }
+            );
 
-        const conversations = await conversationsCollection
-          .find({ participants: { $regex: emailRegex } })
-          .sort({ lastMessageAt: -1, updatedAt: -1 })
-          .toArray();
+            conversations = await conversationsCollection
+              .find({ participants: { $regex: emailRegex } })
+              .sort({ lastMessageAt: -1, updatedAt: -1 })
+              .toArray();
+          }
+        }
 
         if (conversations.length === 0) {
           return res.send([]);

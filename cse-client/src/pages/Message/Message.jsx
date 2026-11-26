@@ -313,51 +313,88 @@ const Message = () => {
       .catch(() => {});
   }, []);
 
+  const convRetryTimerRef = useRef(null);
+
   const fetchConversations = useCallback(async () => {
     if (!user?.email) return;
-    try {
-      const res = await apiClient.get(`/conversations?email=${user.email}`);
-      const list = res.data || [];
-      setConversations(list);
+    const emailKey = user.email.toLowerCase().trim();
+    const cacheKey = `cse_convs_${emailKey}`;
 
-      // Auto-select conversation smoothly without empty-state flashing
-      if (conversationIdFromQuery) {
-        const matched = list.find((c) => c._id === conversationIdFromQuery);
-        if (matched) {
-          setActiveConversation(matched);
-          activeConversationRef.current = matched;
-          return;
+    try {
+      const cached = sessionStorage.getItem(cacheKey);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setConversations((prev) => (prev.length === 0 ? parsed : prev));
+          setLoadingList(false);
         }
       }
-      if (!peerFromQuery && list.length > 0) {
-        setActiveConversation((prev) => {
-          if (prev) {
-            const updated = list.find((c) => c._id === prev._id);
-            if (!updated) {
-              sessionStorage.removeItem("cse_chat_active_conv_id");
-              const fallback = list[0] || null;
-              activeConversationRef.current = fallback;
-              return fallback;
-            }
-            return updated;
-          }
-          const savedId = sessionStorage.getItem("cse_chat_active_conv_id");
-          const matched = list.find((c) => c._id === savedId);
-          const chosen = matched || list[0];
-          activeConversationRef.current = chosen;
-          return chosen;
-        });
-      } else if (list.length === 0) {
-        setActiveConversation(null);
-        activeConversationRef.current = null;
-        setMessages([]);
-        sessionStorage.removeItem("cse_chat_active_conv_id");
-      }
     } catch {
-      setError("Failed to load conversation list.");
-    } finally {
-      setLoadingList(false);
+      // ignore invalid session cache
     }
+
+    const attemptLoad = async (attempt = 0) => {
+      try {
+        const res = await apiClient.get(`/conversations?email=${encodeURIComponent(user.email)}`, {
+          timeout: 60000,
+        });
+        const list = Array.isArray(res.data) ? res.data : [];
+        setConversations(list);
+        setError("");
+        setLoadingList(false);
+        try {
+          sessionStorage.setItem(cacheKey, JSON.stringify(list));
+        } catch {
+          // ignore storage limits
+        }
+
+        // Auto-select conversation smoothly without empty-state flashing
+        if (conversationIdFromQuery) {
+          const matched = list.find((c) => c._id === conversationIdFromQuery);
+          if (matched) {
+            setActiveConversation(matched);
+            activeConversationRef.current = matched;
+            return;
+          }
+        }
+        if (!peerFromQuery && list.length > 0) {
+          setActiveConversation((prev) => {
+            if (prev) {
+              const updated = list.find((c) => c._id === prev._id);
+              if (!updated) {
+                sessionStorage.removeItem("cse_chat_active_conv_id");
+                const fallback = list[0] || null;
+                activeConversationRef.current = fallback;
+                return fallback;
+              }
+              return updated;
+            }
+            const savedId = sessionStorage.getItem("cse_chat_active_conv_id");
+            const matched = list.find((c) => c._id === savedId);
+            const chosen = matched || list[0];
+            activeConversationRef.current = chosen;
+            return chosen;
+          });
+        } else if (list.length === 0) {
+          setActiveConversation(null);
+          activeConversationRef.current = null;
+          setMessages([]);
+          sessionStorage.removeItem("cse_chat_active_conv_id");
+        }
+      } catch {
+        if (attempt < 3) {
+          if (convRetryTimerRef.current) clearTimeout(convRetryTimerRef.current);
+          convRetryTimerRef.current = setTimeout(() => {
+            attemptLoad(attempt + 1);
+          }, 2500);
+          return;
+        }
+        setError("Failed to load conversation list.");
+        setLoadingList(false);
+      }
+    };
+
+    await attemptLoad(0);
   }, [user?.email, peerFromQuery, conversationIdFromQuery]);
 
   const openConversation = useCallback(

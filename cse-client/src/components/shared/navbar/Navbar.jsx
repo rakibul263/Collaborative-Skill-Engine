@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo } from "react";
 import { NavLink, useLocation } from "react-router";
 import { motion } from "framer-motion";
 import {
@@ -31,9 +31,23 @@ import MobileNavDrawer from "./MobileNavDrawer";
 const Navbar = () => {
   const location = useLocation();
   const [isMobileOpen, setIsMobileOpen] = useState(false);
-  const [isDashboardEligible, setIsDashboardEligible] = useState(false);
+  const [eligRecord, setEligRecord] = useState({ email: "", value: null });
   const [scrolled, setScrolled] = useState(false);
   const { user, loading, LogOut: handleLogOut } = useAuth();
+
+  const userEmailKey = user?.email ? user.email.toLowerCase().trim() : "";
+  const isDashboardEligible = useMemo(() => {
+    if (!userEmailKey) return false;
+    if (eligRecord.email === userEmailKey && eligRecord.value !== null) {
+      return eligRecord.value;
+    }
+    if (user?.canCreateCourse) return true;
+    try {
+      return localStorage.getItem(`cse_course_elig_${userEmailKey}`) === "true";
+    } catch {
+      return false;
+    }
+  }, [userEmailKey, eligRecord, user?.canCreateCourse]);
 
   const currentPath = `${location.pathname}${location.search}`;
   const loginUrl =
@@ -51,20 +65,27 @@ const Navbar = () => {
   }, []);
 
   useEffect(() => {
-    if (!user) {
-      setIsDashboardEligible(false);
-      return;
-    }
+    if (!userEmailKey) return;
+    let cancelled = false;
     apiClient
-      .get("/courses/eligibility")
+      .get("/courses/eligibility", { timeout: 45000 })
       .then((res) => {
-        const { canCreateCourse } = res.data || {};
-        setIsDashboardEligible(Boolean(canCreateCourse));
+        if (cancelled) return;
+        const eligible = Boolean(res.data?.canCreateCourse);
+        setEligRecord({ email: userEmailKey, value: eligible });
+        try {
+          localStorage.setItem(`cse_course_elig_${userEmailKey}`, String(eligible));
+        } catch {
+          // ignore storage quota errors
+        }
       })
       .catch(() => {
-        setIsDashboardEligible(false);
+        // Keep cached eligibility on transient network failure
       });
-  }, [user]);
+    return () => {
+      cancelled = true;
+    };
+  }, [userEmailKey]);
 
   // Grouped Navigation Structure:
   // 1. Home (Landing Page)

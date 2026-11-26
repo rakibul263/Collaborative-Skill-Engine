@@ -8,13 +8,12 @@ import {
   signOut,
   GoogleAuthProvider,
   signInWithPopup,
-  signInWithRedirect,
-  getRedirectResult,
   sendPasswordResetEmail,
   updateProfile as updateFirebaseProfile,
 } from "firebase/auth";
 import { getSocket } from "@/lib/socket";
-import { clearJWT } from "@/lib/jwt";
+import { getJWT, clearJWT, isTokenExpired } from "@/lib/jwt";
+import apiClient, { exchangeToken } from "@/lib/apiClient";
 import axios from "axios";
 import { withCacheBust } from "@/lib/profileApi";
 import { calculateProfileCompletion } from "@/lib/profileCompletion";
@@ -30,6 +29,14 @@ const buildMergedUser = (firebaseUser, mongoUser = null) => {
   const name = mongoUser?.fullName || firebaseUser.displayName || "";
   const profileCompletion = calculateProfileCompletion(mongoUser || {});
 
+  const roleLower = String(mongoUser?.role || "").toLowerCase();
+  const canCreateCourse = Boolean(
+    mongoUser?.hasStudioAccess === true ||
+      mongoUser?.canCreateCourse === true ||
+      roleLower === "admin" ||
+      roleLower === "instructor"
+  );
+
   return {
     ...firebaseUser,
     uid: firebaseUser.uid,
@@ -39,6 +46,7 @@ const buildMergedUser = (firebaseUser, mongoUser = null) => {
     photoURL: image,
     profileImage: image,
     role: mongoUser?.role || "Learner",
+    canCreateCourse,
     headline: mongoUser?.headline || "",
     bio: mongoUser?.bio || "",
     teachSkills: mongoUser?.teachSkills || [],
@@ -109,35 +117,45 @@ const AuthProvider = ({ children } = {}) => {
 
   const syncGoogleUserState = useCallback(async (firebaseUser) => {
     if (!firebaseUser?.email) return;
-    try {
-      const res = await axios.get(
-        `${API_URL}/users?email=${encodeURIComponent(firebaseUser.email)}`,
-        { timeout: 30000 }
-      );
-      if (!res.data) {
-        sessionStorage.setItem(
-          "googleNewUser",
-          JSON.stringify({
-            fullName: firebaseUser.displayName || "",
-            email: firebaseUser.email,
-            profileImage: firebaseUser.photoURL || "",
-            uid: firebaseUser.uid,
-          })
-        );
-      } else {
-        sessionStorage.removeItem("googleNewUser");
+    const lookupUrl = `${API_URL}/users?email=${encodeURIComponent(firebaseUser.email)}`;
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await axios.get(lookupUrl, { timeout: 45000 });
+        if (!res.data) {
+          sessionStorage.setItem(
+            "googleNewUser",
+            JSON.stringify({
+              fullName: firebaseUser.displayName || "",
+              email: firebaseUser.email,
+              profileImage: firebaseUser.photoURL || "",
+              uid: firebaseUser.uid,
+            })
+          );
+        } else {
+          sessionStorage.removeItem("googleNewUser");
+        }
+        return;
+      } catch (err) {
+        if (err?.response?.status === 404) {
+          sessionStorage.setItem(
+            "googleNewUser",
+            JSON.stringify({
+              fullName: firebaseUser.displayName || "",
+              email: firebaseUser.email,
+              profileImage: firebaseUser.photoURL || "",
+              uid: firebaseUser.uid,
+            })
+          );
+          return;
+        }
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 2500));
+        }
       }
-    } catch {
-      sessionStorage.setItem(
-        "googleNewUser",
-        JSON.stringify({
-          fullName: firebaseUser.displayName || "",
-          email: firebaseUser.email,
-          profileImage: firebaseUser.photoURL || "",
-          uid: firebaseUser.uid,
-        })
-      );
     }
+    // Transient network outage should NOT lock an existing Google user out of logging in
+    sessionStorage.removeItem("googleNewUser");
   }, []);
 
   const signInWithGoogle = async () => {
@@ -146,20 +164,14 @@ const AuthProvider = ({ children } = {}) => {
     }
     const provider = new GoogleAuthProvider();
     provider.setCustomParameters({ prompt: "select_account" });
-    try {
-      const result = await signInWithPopup(auth, provider);
-      await syncGoogleUserState(result.user);
-      return result;
-    } catch (error) {
-      if (
-        error?.code === "auth/popup-blocked" ||
-        error?.code === "auth/operation-not-supported-in-this-environment"
-      ) {
-        await signInWithRedirect(auth, provider);
-        return { redirected: true };
-      }
-      throw error;
-    }
+
+    const result = await signInWithPopup(auth, provider);
+    // Warm JWT exchange + DB check without failing login on temporary cold-start latency
+    await Promise.allSettled([
+      syncGoogleUserState(result.user),
+      exchangeToken(),
+    ]);
+    return result;
   };
 
   const resetPassword = (email) => {
@@ -268,20 +280,8 @@ const AuthProvider = ({ children } = {}) => {
     let heartbeatInterval = null;
     let onConnectHandler = null;
     let visibilityHandler = null;
-    let unSubscribe = () => {};
 
-    (async () => {
-      try {
-        const redirectResult = await getRedirectResult(auth);
-        if (redirectResult?.user) {
-          await syncGoogleUserState(redirectResult.user);
-        }
-      } catch (err) {
-        console.warn("[Auth] Google redirect result warning:", err?.message);
-      }
-      if (!isMounted) return;
-
-      unSubscribe = onAuthStateChanged(auth, async (currentUser) => {
+    const unSubscribe = onAuthStateChanged(auth, async (currentUser) => {
       const socket = getSocket();
 
       if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -295,7 +295,27 @@ const AuthProvider = ({ children } = {}) => {
         clearJWT();
         setLoading(false);
       } else {
-        clearJWT();
+        // Keep existing valid JWT for the same user so protected calls don't stall on reload
+        const existingToken = getJWT();
+        let keepToken = false;
+        if (existingToken && !isTokenExpired(existingToken)) {
+          try {
+            const payload = JSON.parse(atob(existingToken.split(".")[1]));
+            if (
+              payload?.email &&
+              currentUser.email &&
+              payload.email.toLowerCase() === currentUser.email.toLowerCase()
+            ) {
+              keepToken = true;
+            }
+          } catch {
+            keepToken = false;
+          }
+        }
+        if (!keepToken) {
+          clearJWT();
+          void exchangeToken();
+        }
         if (!socket.connected) socket.connect();
 
         const joinPresence = () => {
@@ -337,25 +357,36 @@ const AuthProvider = ({ children } = {}) => {
         };
         document.addEventListener("visibilitychange", visibilityHandler);
 
-        // Set initial user snapshot
+        // Set initial user snapshot immediately
         const initialUser = buildMergedUser(currentUser, null);
         setUser(initialUser);
         setLoading(false);
 
-        // Asynchronously fetch enriched profile from MongoDB
+        // Asynchronously fetch enriched profile from MongoDB with cold-start retry
         try {
-          const res = await axios.get(
-            `${API_URL}/users?email=${encodeURIComponent(currentUser.email)}`
+          const res = await apiClient.get(
+            `/users?email=${encodeURIComponent(currentUser.email)}`,
+            { timeout: 60000 }
           );
-          if (res.data) {
-            setUser(buildMergedUser(currentUser, res.data));
+          if (isMounted && res.data) {
+            const merged = buildMergedUser(currentUser, res.data);
+            setUser(merged);
+            if (merged?.canCreateCourse && currentUser.email) {
+              try {
+                localStorage.setItem(
+                  `cse_course_elig_${currentUser.email.toLowerCase().trim()}`,
+                  "true"
+                );
+              } catch {
+                // ignore storage limits
+              }
+            }
           }
         } catch (err) {
           console.warn("[Auth] Profile enrichment warning:", err.message);
         }
       }
-      });
-    })();
+    });
     return () => {
       isMounted = false;
       if (heartbeatInterval) clearInterval(heartbeatInterval);
@@ -368,7 +399,7 @@ const AuthProvider = ({ children } = {}) => {
       }
       unSubscribe();
     };
-  }, [syncGoogleUserState]);
+  }, []);
 
   const authInfo = {
     user,

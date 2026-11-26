@@ -35,8 +35,22 @@ const CoursesMarketplace = () => {
   const [sortBy, setSortBy] = useState("newest"); // "newest" | "price-low" | "price-high"
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [canCreateCourse, setCanCreateCourse] = useState(false);
+  const [eligRecord, setEligRecord] = useState({ email: "", value: null });
   const [enrolledIds, setEnrolledIds] = useState(() => new Set());
+
+  const userEmailKey = user?.email ? user.email.toLowerCase().trim() : "";
+  const canCreateCourse = useMemo(() => {
+    if (!userEmailKey) return false;
+    if (eligRecord.email === userEmailKey && eligRecord.value !== null) {
+      return eligRecord.value;
+    }
+    if (user?.canCreateCourse) return true;
+    try {
+      return localStorage.getItem(`cse_course_elig_${userEmailKey}`) === "true";
+    } catch {
+      return false;
+    }
+  }, [userEmailKey, eligRecord, user?.canCreateCourse]);
 
   // Fetch published courses with auto-retry on network/boot delay
   const fetchCourses = useCallback(async () => {
@@ -73,31 +87,42 @@ const CoursesMarketplace = () => {
 
   // Check course creation / instructor eligibility & enrolled courses
   useEffect(() => {
-    if (!user?.email) {
+    if (!userEmailKey) {
       Promise.resolve().then(() => {
-        setCanCreateCourse(false);
         setEnrolledIds(new Set());
       });
       return;
     }
+    let cancelled = false;
     apiClient
-      .get("/courses/eligibility")
+      .get("/courses/eligibility", { timeout: 45000 })
       .then((res) => {
-        setCanCreateCourse(Boolean(res.data?.canCreateCourse));
+        if (cancelled) return;
+        const eligible = Boolean(res.data?.canCreateCourse);
+        setEligRecord({ email: userEmailKey, value: eligible });
+        try {
+          localStorage.setItem(`cse_course_elig_${userEmailKey}`, String(eligible));
+        } catch {
+          // ignore storage quota errors
+        }
       })
       .catch(() => {
-        setCanCreateCourse(false);
+        // Keep cached eligibility if request fails transiently
       });
     apiClient
-      .get("/courses/my-enrollments")
+      .get("/courses/my-enrollments", { timeout: 45000 })
       .then((res) => {
+        if (cancelled) return;
         const list = Array.isArray(res.data) ? res.data : [];
         setEnrolledIds(new Set(list.map((c) => c._id)));
       })
       .catch(() => {
-        setEnrolledIds(new Set());
+        if (!cancelled) setEnrolledIds(new Set());
       });
-  }, [user]);
+    return () => {
+      cancelled = true;
+    };
+  }, [userEmailKey]);
 
   // Derived filtered & sorted courses
   const filteredCourses = useMemo(() => {
