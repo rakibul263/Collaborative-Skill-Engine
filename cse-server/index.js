@@ -173,8 +173,8 @@ const io = new Server(httpServer, {
   cors: corsConfig,
   transports: ["websocket", "polling"],
   perMessageDeflate: false,
-  pingInterval: 15000,
-  pingTimeout: 10000,
+  pingInterval: 25000,
+  pingTimeout: 25000,
 });
 
 const onlineUsers = new Map();
@@ -1186,12 +1186,16 @@ async function run() {
         }
       });
 
-      socket.on("rtc:ready", ({ to, roomId, scheduleId, from }) => {
+      socket.on("rtc:ready", ({ to, roomId, scheduleId, from, forceOffer }) => {
         const sender = from || socket.data.email;
+        if (roomId) {
+          socket.join(`code-room:${roomId}`);
+        }
         const payload = {
           from: sender,
           roomId,
           scheduleId,
+          forceOffer: Boolean(forceOffer),
         };
         if (to && to !== "group") {
           emitToUser(to, "rtc:ready", payload);
@@ -1203,6 +1207,7 @@ async function run() {
 
       socket.on("rtc:offer", ({ to, offer, scheduleId, roomId, from }) => {
         if (!offer) return;
+        if (roomId) socket.join(`code-room:${roomId}`);
         const payload = {
           from: from || socket.data.email,
           offer,
@@ -1214,6 +1219,7 @@ async function run() {
 
       socket.on("rtc:answer", ({ to, answer, scheduleId, roomId, from }) => {
         if (!answer) return;
+        if (roomId) socket.join(`code-room:${roomId}`);
         const payload = {
           from: from || socket.data.email,
           answer,
@@ -1225,6 +1231,7 @@ async function run() {
 
       socket.on("rtc:ice-candidate", ({ to, candidate, roomId, from }) => {
         if (!candidate) return;
+        if (roomId) socket.join(`code-room:${roomId}`);
         const payload = {
           from: from || socket.data.email,
           candidate,
@@ -3198,6 +3205,99 @@ async function run() {
       } catch (error) {
         console.error(error);
         res.status(500).send({ message: "Server error" });
+      }
+    });
+
+    let iceServersCache = null;
+    let iceServersExpiresAt = 0;
+
+    app.get("/rtc/ice-servers", async (req, res) => {
+      try {
+        if (iceServersCache && Date.now() < iceServersExpiresAt) {
+          return res.json({ iceServers: iceServersCache });
+        }
+
+        const servers = [
+          { urls: "stun:stun.l.google.com:19302" },
+          { urls: "stun:stun1.l.google.com:19302" },
+          { urls: "stun:stun.cloudflare.com:3478" },
+          { urls: "stun:openrelay.metered.ca:80" },
+        ];
+
+        if (process.env.ICE_SERVERS_JSON) {
+          try {
+            const parsed = JSON.parse(process.env.ICE_SERVERS_JSON);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              iceServersCache = parsed;
+              iceServersExpiresAt = Date.now() + 10 * 60 * 1000;
+              return res.json({ iceServers: parsed });
+            }
+          } catch {
+            // ignore malformed ICE_SERVERS_JSON
+          }
+        }
+
+        if (process.env.METERED_DOMAIN && process.env.METERED_API_KEY) {
+          try {
+            const resp = await fetch(
+              `https://${process.env.METERED_DOMAIN}/api/v1/turn/credentials?apiKey=${encodeURIComponent(process.env.METERED_API_KEY)}`,
+              { signal: AbortSignal.timeout(4000) }
+            );
+            if (resp.ok) {
+              const dynamicList = await resp.json();
+              if (Array.isArray(dynamicList) && dynamicList.length > 0) {
+                iceServersCache = dynamicList;
+                iceServersExpiresAt = Date.now() + 10 * 60 * 1000;
+                return res.json({ iceServers: dynamicList });
+              }
+            }
+          } catch {
+            // fallback to TURN env or OpenRelay below
+          }
+        }
+
+        if (process.env.TURN_URL) {
+          servers.push({
+            urls: process.env.TURN_URL,
+            username: process.env.TURN_USERNAME || "",
+            credential: process.env.TURN_PASSWORD || "",
+          });
+        } else {
+          servers.push(
+            {
+              urls: "turn:openrelay.metered.ca:80",
+              username: "openrelayproject",
+              credential: "openrelayproject",
+            },
+            {
+              urls: "turn:openrelay.metered.ca:443",
+              username: "openrelayproject",
+              credential: "openrelayproject",
+            },
+            {
+              urls: "turn:openrelay.metered.ca:443?transport=tcp",
+              username: "openrelayproject",
+              credential: "openrelayproject",
+            }
+          );
+        }
+
+        iceServersCache = servers;
+        iceServersExpiresAt = Date.now() + 10 * 60 * 1000;
+        return res.json({ iceServers: servers });
+      } catch {
+        return res.json({
+          iceServers: [
+            { urls: "stun:stun.l.google.com:19302" },
+            { urls: "stun:stun1.l.google.com:19302" },
+            { urls: "stun:openrelay.metered.ca:80" },
+            {
+              urls: "turn:openrelay.metered.ca:443?transport=tcp",
+              username: "openrelayproject",
+              credential: "openrelayproject",
+            },
+          ],
+        });
       }
     });
 
