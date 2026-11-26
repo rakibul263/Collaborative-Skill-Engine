@@ -9,6 +9,14 @@ const VECTOR_DIR = path.join(__dirname, "../storage/faiss-index");
 let vectorStore = null;
 let initPromise = null;
 let vectorDisabled = false;
+let cachedRawDocs = null;
+
+const getCachedKnowledgeDocs = () => {
+  if (!cachedRawDocs) {
+    cachedRawDocs = loadKnowledgeDocuments();
+  }
+  return cachedRawDocs;
+};
 
 const withTimeout = (promise, ms, label) =>
   Promise.race([
@@ -98,39 +106,57 @@ const retrieveRelevantDocuments = async ({
   message = "",
   teachSkills = [],
   learnSkills = [],
-  topK = 5,
+  topK = 4,
 }) => {
   if (vectorDisabled) {
-    return keywordFallbackRetrieve({ goal, teachSkills, learnSkills });
+    return keywordFallbackRetrieve({ goal, message, teachSkills, learnSkills });
   }
 
-  const store = await initVectorStore();
-  if (!store) {
-    return keywordFallbackRetrieve({ goal, teachSkills, learnSkills });
+  try {
+    const query = [
+      `Career goal: ${goal}`,
+      `User question: ${message}`,
+      `Skills to teach: ${teachSkills.join(", ")}`,
+      `Skills to learn: ${learnSkills.join(", ")}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const results = await withTimeout(
+      (async () => {
+        const store = await initVectorStore();
+        if (!store) return null;
+        return store.similaritySearch(query, topK);
+      })(),
+      1500,
+      "Vector retrieval"
+    );
+
+    if (!results) {
+      return keywordFallbackRetrieve({ goal, message, teachSkills, learnSkills });
+    }
+
+    const chunks = results.map((doc) => ({
+      content: doc.pageContent,
+      text: doc.pageContent,
+      source: doc.metadata?.source || "unknown",
+      topic: doc.metadata?.topic || "",
+      category: doc.metadata?.category || "",
+    }));
+
+    return { chunks, query };
+  } catch (err) {
+    // Disable remote vector lookup permanently if model/key errors occur so subsequent AI queries are instant
+    const msg = String(err?.message || "");
+    if (msg.includes("404") || msg.includes("403") || msg.includes("400") || msg.includes("API key")) {
+      vectorDisabled = true;
+    }
+    return keywordFallbackRetrieve({ goal, message, teachSkills, learnSkills });
   }
-
-  const query = [
-    `Career goal: ${goal}`,
-    `User question: ${message}`,
-    `Skills to teach: ${teachSkills.join(", ")}`,
-    `Skills to learn: ${learnSkills.join(", ")}`,
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const results = await store.similaritySearch(query, topK);
-  const chunks = results.map((doc) => ({
-    content: doc.pageContent,
-    source: doc.metadata?.source || "unknown",
-    topic: doc.metadata?.topic || "",
-    category: doc.metadata?.category || "",
-  }));
-
-  return { chunks, query };
 };
 
 const keywordFallbackRetrieve = ({ goal, message, teachSkills = [], learnSkills = [] }) => {
-  const rawDocs = loadKnowledgeDocuments();
+  const rawDocs = getCachedKnowledgeDocs();
   const terms = [
     goal || "",
     message || "",
@@ -169,12 +195,16 @@ const keywordFallbackRetrieve = ({ goal, message, teachSkills = [], learnSkills 
     .slice(0, 4);
 
   return {
-    chunks: scored.map(({ doc }) => ({
-      content: doc.pageContent.slice(0, 1200),
-      source: doc.metadata.source,
-      topic: doc.metadata.topic,
-      category: doc.metadata.category,
-    })),
+    chunks: scored.map(({ doc }) => {
+      const snippet = doc.pageContent.slice(0, 900);
+      return {
+        content: snippet,
+        text: snippet,
+        source: doc.metadata.source,
+        topic: doc.metadata.topic,
+        category: doc.metadata.category,
+      };
+    }),
     query: "keyword-fallback",
   };
 };

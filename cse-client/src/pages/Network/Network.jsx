@@ -18,7 +18,8 @@ import {
   Sparkles,
 } from "lucide-react";
 import { FiLoader } from "react-icons/fi";
-import axios from "axios";
+import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import useAuth from "@/hooks/useAuth";
 import EngineLoadingComponent from "@/components/shared/loading/EngineLoadingComponent";
 import { useNavigate } from "react-router";
@@ -38,22 +39,29 @@ const Network = () => {
   const { user } = useAuth();
   const navigate = useNavigate();
 
-  const [users, setUsers] = useState([]);
-  const [loading, setLoading] = useState(true);
+  const initialUsers = user?.email
+    ? getCachedData(`/find-mentors?email=${encodeURIComponent(user.email)}`) || []
+    : [];
+  const [users, setUsers] = useState(() => initialUsers);
+  const [loading, setLoading] = useState(() => Boolean(user?.email && initialUsers.length === 0));
   const [searchTerm, setSearchTerm] = useState("");
   const [selectedSkill, setSelectedSkill] = useState("All");
   const [selectedLevel, setSelectedLevel] = useState("All");
   const [filterOpen, setFilterOpen] = useState(false);
-  const [stats, setStats] = useState({ total: 0, online: 0, connected: 0 });
+  const [stats, setStats] = useState(() => ({
+    total: initialUsers.length,
+    online: initialUsers.filter((u) => u.connectionStatus === "connected").length,
+    connected: initialUsers.filter((u) => u.connectionStatus === "connected").length,
+  }));
 
-  const fetchAllUsers = async () => {
+  const fetchAllUsers = async (forceRefresh = false) => {
     if (!user?.email) return;
+    const url = `/find-mentors?email=${encodeURIComponent(user.email)}`;
+    const hasCache = Boolean(getCachedData(url));
     try {
-      setLoading(true);
+      if (!hasCache && !forceRefresh) setLoading(true);
       // fetch find-mentors (which returns users with skill match info + connection status)
-      const res = await axios.get(
-        `${import.meta.env.VITE_API_URL}/find-mentors?email=${user.email}`,
-      );
+      const res = await apiClient.get(url, { forceRefresh });
       const data = res.data || [];
       setUsers(data);
       setStats({
@@ -62,7 +70,7 @@ const Network = () => {
         connected: data.filter((u) => u.connectionStatus === "connected").length,
       });
     } catch {
-      setUsers([]);
+      if (!hasCache) setUsers([]);
     } finally {
       setLoading(false);
     }
@@ -342,7 +350,7 @@ const NetworkCard = ({ member, index, currentUser, onRefetch, navigate }) => {
     }
     setLoading(true);
     try {
-      await axios.post(`${import.meta.env.VITE_API_URL}/connections/requests`, {
+      await apiClient.post("/connections/requests", {
         senderUid: currentUser?.uid,
         senderEmail: currentUser?.email,
         senderName: currentUser?.displayName || "Anonymous",
@@ -362,7 +370,7 @@ const NetworkCard = ({ member, index, currentUser, onRefetch, navigate }) => {
   const handleCancel = async () => {
     setLoading(true);
     try {
-      await axios.delete(`${import.meta.env.VITE_API_URL}/connections/requests/cancel`, {
+      await apiClient.delete("/connections/requests/cancel", {
         data: { senderEmail: currentUser?.email, receiverEmail: member.email },
       });
       setStatus("none");

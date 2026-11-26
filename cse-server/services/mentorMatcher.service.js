@@ -24,11 +24,23 @@ const findMentorSuggestions = async ({
   }
 
   const otherUsers = await usersCollection
-    .find({
-      email: { $ne: email },
-      teachSkills: { $exists: true, $ne: [] },
-    })
-    .limit(80)
+    .find(
+      {
+        email: { $ne: email },
+        teachSkills: { $exists: true, $ne: [] },
+      },
+      {
+        projection: {
+          _id: 1,
+          fullName: 1,
+          email: 1,
+          profileImage: 1,
+          teachLevel: 1,
+          teachSkills: 1,
+        },
+      }
+    )
+    .limit(50)
     .toArray();
 
   const results = [];

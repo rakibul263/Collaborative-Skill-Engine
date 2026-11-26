@@ -199,6 +199,7 @@ const createFuse = (skills) => {
 };
 
 let client;
+let routesRegistered = false;
 
 async function run() {
   const uri = process.env.MONGODB_URI;
@@ -269,100 +270,79 @@ async function run() {
     const teamsCollection = db.collection("teams");
     const adminSecurityAlertsCollection = db.collection("admin_security_alerts");
 
-    await connectionRequestsCollection.createIndex(
-      { senderEmail: 1, receiverEmail: 1, status: 1 },
-      { unique: true, partialFilterExpression: { status: "pending" } },
-    );
-    await connectionRequestsCollection.createIndex({ receiverEmail: 1, status: 1, createdAt: -1 });
-    await connectionRequestsCollection.createIndex({ senderEmail: 1, status: 1 });
-    await conversationsCollection.createIndex(
-      { participantsKey: 1 },
-      { unique: true },
-    );
-    await conversationsCollection.createIndex({ participants: 1 });
-    await conversationsCollection.createIndex({ participants: 1, lastMessageAt: -1 });
-    await messagesCollection.createIndex({ conversationId: 1, createdAt: 1 });
-    await messagesCollection.createIndex({ conversationId: 1, createdAt: -1 });
-    await messagesCollection.createIndex({ receiverEmail: 1, seenAt: 1 });
-    await ratingsCollection.createIndex(
-      { reviewerEmail: 1, targetEmail: 1 },
-      { unique: true },
-    );
-    await ratingsCollection.createIndex({ targetEmail: 1, createdAt: -1 });
-    await ratingsCollection.createIndex({ fraudStatus: 1, rating: -1 });
-    await aiAdvisorSessionsCollection.createIndex({ userEmail: 1, createdAt: -1 });
-    await schedulesCollection.createIndex({ conversationId: 1, status: 1 });
-    await schedulesCollection.createIndex({ startTime: 1, status: 1 });
-    await userNotificationsCollection.createIndex({ recipientEmail: 1, createdAt: -1 });
-    await userNotificationsCollection.createIndex({ recipientEmail: 1, isRead: 1 });
-    await courseAppealsCollection.createIndex({ courseId: 1, learnerEmail: 1, createdAt: -1 });
-    await courseAppealsCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
-    await courseAppealsCollection.createIndex({ enrollmentId: 1 });
-    await adminDisputesCollection.createIndex({ courseId: 1, createdAt: -1 });
+    // Ensure indexes concurrently in background so HTTP routes mount & answer immediately on boot
+    void Promise.allSettled([
+      connectionRequestsCollection.createIndex(
+        { senderEmail: 1, receiverEmail: 1, status: 1 },
+        { unique: true, partialFilterExpression: { status: "pending" } },
+      ),
+      connectionRequestsCollection.createIndex({ receiverEmail: 1, status: 1, createdAt: -1 }),
+      connectionRequestsCollection.createIndex({ senderEmail: 1, status: 1 }),
+      conversationsCollection.createIndex({ participantsKey: 1 }, { unique: true }),
+      conversationsCollection.createIndex({ participants: 1 }),
+      conversationsCollection.createIndex({ participants: 1, lastMessageAt: -1 }),
+      messagesCollection.createIndex({ conversationId: 1, createdAt: 1 }),
+      messagesCollection.createIndex({ conversationId: 1, createdAt: -1 }),
+      messagesCollection.createIndex({ receiverEmail: 1, seenAt: 1 }),
+      ratingsCollection.createIndex({ reviewerEmail: 1, targetEmail: 1 }, { unique: true }),
+      ratingsCollection.createIndex({ targetEmail: 1, createdAt: -1 }),
+      ratingsCollection.createIndex({ fraudStatus: 1, rating: -1 }),
+      aiAdvisorSessionsCollection.createIndex({ userEmail: 1, createdAt: -1 }),
+      schedulesCollection.createIndex({ conversationId: 1, status: 1 }),
+      schedulesCollection.createIndex({ startTime: 1, status: 1 }),
+      userNotificationsCollection.createIndex({ recipientEmail: 1, createdAt: -1 }),
+      userNotificationsCollection.createIndex({ recipientEmail: 1, isRead: 1 }),
+      courseAppealsCollection.createIndex({ courseId: 1, learnerEmail: 1, createdAt: -1 }),
+      courseAppealsCollection.createIndex({ instructorEmail: 1, createdAt: -1 }),
+      courseAppealsCollection.createIndex({ enrollmentId: 1 }),
+      adminDisputesCollection.createIndex({ courseId: 1, createdAt: -1 }),
+      usersCollection.createIndex({ email: 1 }),
+      usersCollection.createIndex({ username: 1 }),
+      usersCollection.createIndex({ role: 1 }),
+      usersCollection.createIndex({ createdAt: -1 }),
+      usersCollection.createIndex({ isDeactivated: 1 }),
+      usersCollection.createIndex({ teachSkills: 1 }),
+      usersCollection.createIndex({ learnSkills: 1 }),
+      usersCollection.createIndex({ role: 1, isDeactivated: 1 }),
+      adminAuditLogsCollection.createIndex({ timestamp: -1 }),
+      schedulesCollection.createIndex({ schedulerEmail: 1, status: 1 }),
+      coursesCollection.createIndex({ instructorEmail: 1, status: 1 }),
+      coursesCollection.createIndex({ instructorEmail: 1, createdAt: -1 }),
+      coursesCollection.createIndex({ status: 1 }),
+      coursesCollection.createIndex({ createdAt: -1 }),
+      coursesCollection.createIndex({ status: 1, createdAt: -1 }),
+      coursesCollection.createIndex({ status: 1, category: 1 }),
+      coursesCollection.dropIndex("instructorEmail_1_topic_1").catch(() => {}),
+      coursesCollection.createIndex({ instructorEmail: 1, topic: 1 }),
+      courseEnrollmentsCollection.createIndex({ courseId: 1, learnerEmail: 1 }, { unique: true }),
+      courseEnrollmentsCollection.createIndex({ instructorEmail: 1, createdAt: -1 }),
+      courseEnrollmentsCollection.createIndex({ learnerEmail: 1, createdAt: -1 }),
+      courseEnrollmentsCollection.createIndex({ createdAt: -1 }),
+      courseEnrollmentsCollection.createIndex({ learnerEmail: 1, status: 1 }),
+      courseAppealsCollection.createIndex({ instructorEmail: 1, updatedAt: -1, createdAt: -1 }),
+      courseReviewsCollection.createIndex({ instructorEmail: 1, createdAt: -1 }),
+      studioAuditLogsCollection.createIndex({ instructorEmail: 1, createdAt: -1 }),
+      lessonsCollection.createIndex({ courseId: 1, order: 1 }),
+      lessonProgressCollection.createIndex({ learnerEmail: 1, courseId: 1 }),
+      lessonProgressCollection.createIndex({ learnerEmail: 1, lessonId: 1, videoKey: 1 }, { unique: true }),
+      courseCertificatesCollection.createIndex({ courseId: 1, learnerEmail: 1 }, { unique: true }),
+      courseCertificatesCollection.createIndex({ certificateCode: 1 }, { unique: true }),
+      courseCertificatesCollection.createIndex({ certHash: 1 }),
+      courseCertificatesCollection.createIndex({ learnerEmail: 1, issuedAt: -1 }),
+      courseReviewsCollection.createIndex({ courseId: 1, createdAt: -1 }),
+      courseReviewsCollection.createIndex({ rating: -1 }),
+      courseCouponsCollection.createIndex({ instructorEmail: 1, code: 1 }),
+      userLoginLogsCollection.createIndex({ timestamp: -1 }),
+      userLoginLogsCollection.createIndex({ email: 1, timestamp: -1 }),
+      userLoginLogsCollection.createIndex({ ip: 1 }),
+      blockedIpsCollection.createIndex({ ip: 1 }, { unique: true }),
+      teamsCollection.createIndex({ leaderEmail: 1 }),
+      teamsCollection.createIndex({ "members.email": 1 }),
+      teamsCollection.createIndex({ createdAt: -1 }),
+      adminSecurityAlertsCollection.createIndex({ timestamp: -1 }),
+      adminSecurityAlertsCollection.createIndex({ type: 1, status: 1 }),
+    ]);
 
-    // High performance indexes for Users, Admin Telemetry & Audits
-    await usersCollection.createIndex({ email: 1 });
-    await usersCollection.createIndex({ username: 1 });
-    await usersCollection.createIndex({ role: 1 });
-    await usersCollection.createIndex({ createdAt: -1 });
-    await usersCollection.createIndex({ isDeactivated: 1 });
-    await usersCollection.createIndex({ teachSkills: 1 });
-    await usersCollection.createIndex({ learnSkills: 1 });
-    await usersCollection.createIndex({ role: 1, isDeactivated: 1 });
-    await adminAuditLogsCollection.createIndex({ timestamp: -1 });
-    await schedulesCollection.createIndex({ schedulerEmail: 1, status: 1 });
-
-    await coursesCollection.createIndex({ instructorEmail: 1, status: 1 });
-    await coursesCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
-    await coursesCollection.createIndex({ status: 1 });
-    await coursesCollection.createIndex({ createdAt: -1 });
-    await coursesCollection.createIndex({ status: 1, createdAt: -1 });
-    await coursesCollection.createIndex({ status: 1, category: 1 });
-    try {
-      await coursesCollection.dropIndex("instructorEmail_1_topic_1");
-    } catch {
-      // index may not exist or not have legacy unique constraint
-    }
-    await coursesCollection.createIndex({ instructorEmail: 1, topic: 1 });
-    await courseEnrollmentsCollection.createIndex(
-      { courseId: 1, learnerEmail: 1 },
-      { unique: true }
-    );
-    await courseEnrollmentsCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
-    await courseEnrollmentsCollection.createIndex({ learnerEmail: 1, createdAt: -1 });
-    await courseEnrollmentsCollection.createIndex({ createdAt: -1 });
-    await courseEnrollmentsCollection.createIndex({ learnerEmail: 1, status: 1 });
-    await courseAppealsCollection.createIndex({ instructorEmail: 1, updatedAt: -1, createdAt: -1 });
-    await courseReviewsCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
-    await studioAuditLogsCollection.createIndex({ instructorEmail: 1, createdAt: -1 });
-    await lessonsCollection.createIndex({ courseId: 1, order: 1 });
-    await lessonProgressCollection.createIndex({ learnerEmail: 1, courseId: 1 });
-    await lessonProgressCollection.createIndex(
-      { learnerEmail: 1, lessonId: 1, videoKey: 1 },
-      { unique: true }
-    );
-    await courseCertificatesCollection.createIndex(
-      { courseId: 1, learnerEmail: 1 },
-      { unique: true }
-    );
-    await courseCertificatesCollection.createIndex(
-      { certificateCode: 1 },
-      { unique: true }
-    );
-    await courseCertificatesCollection.createIndex({ certHash: 1 });
-    await courseCertificatesCollection.createIndex({ learnerEmail: 1, issuedAt: -1 });
-    await courseReviewsCollection.createIndex({ courseId: 1, createdAt: -1 });
-    await courseReviewsCollection.createIndex({ rating: -1 });
-    await courseCouponsCollection.createIndex({ instructorEmail: 1, code: 1 });
-    await userLoginLogsCollection.createIndex({ timestamp: -1 });
-    await userLoginLogsCollection.createIndex({ email: 1, timestamp: -1 });
-    await userLoginLogsCollection.createIndex({ ip: 1 });
-    await blockedIpsCollection.createIndex({ ip: 1 }, { unique: true });
-    await teamsCollection.createIndex({ leaderEmail: 1 });
-    await teamsCollection.createIndex({ "members.email": 1 });
-    await teamsCollection.createIndex({ createdAt: -1 });
-    await adminSecurityAlertsCollection.createIndex({ timestamp: -1 });
-    await adminSecurityAlertsCollection.createIndex({ type: 1, status: 1 });
     await initIpBlocker(blockedIpsCollection);
 
     initFirebaseAdmin();
@@ -3225,7 +3205,8 @@ async function run() {
       return res.send({ serverTime: new Date().toISOString() });
     });
 
-    console.log("MongoDB Connected");
+    routesRegistered = true;
+    console.log("MongoDB Connected & Routes Ready");
   } catch (error) {
     console.error(error);
   }
@@ -3238,10 +3219,12 @@ run().catch(console.dir);
 // retrying its connection.
 app.get("/health", (req, res) => {
   const mongoConnected = Boolean(client?.topology?.isConnected?.());
+  const ready = mongoConnected && routesRegistered;
   res.status(200).json({
-    status: mongoConnected ? "ok" : "starting",
+    status: ready ? "ok" : "starting",
     uptime: Math.round(process.uptime()),
     mongo: mongoConnected ? "connected" : "disconnected",
+    routesReady: routesRegistered,
     timestamp: new Date().toISOString(),
   });
 });

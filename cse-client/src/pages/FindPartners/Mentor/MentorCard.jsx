@@ -19,7 +19,7 @@ import {
   Clock,
   ChevronRight,
 } from "lucide-react";
-import axios from "axios";
+import apiClient from "@/lib/apiClient";
 import Swal from "sweetalert2";
 import { showConfirm } from "@/components/ui/confirm-dialog";
 import { toast } from "@/components/ui/toast-system";
@@ -103,7 +103,7 @@ const MentorCard = ({ mentor, index, refetch }) => {
     if (!result.isConfirmed) return;
 
     try {
-      const res = await axios.post(`${import.meta.env.VITE_API_URL}/ratings`, {
+      const res = await apiClient.post("/ratings", {
         reviewerEmail: authUser.email,
         targetEmail: email,
         rating: result.value.rating,
@@ -147,10 +147,7 @@ const MentorCard = ({ mentor, index, refetch }) => {
         receiverEmail: email,
       };
 
-      await axios.post(
-        `${import.meta.env.VITE_API_URL}/connections/requests`,
-        requestData
-      );
+      await apiClient.post("/connections/requests", requestData);
 
       setConnectionStatus("sent");
       toast.confirmed("Connection Request Sent", {
@@ -181,12 +178,9 @@ const MentorCard = ({ mentor, index, refetch }) => {
 
     setLoading(true);
     try {
-      await axios.delete(
-        `${import.meta.env.VITE_API_URL}/connections/requests/cancel`,
-        {
-          data: { senderEmail: authUser?.email, receiverEmail: email },
-        }
-      );
+      await apiClient.delete("/connections/requests/cancel", {
+        data: { senderEmail: authUser?.email, receiverEmail: email },
+      });
       setConnectionStatus("none");
       toast.deleted("Connection Request Withdrawn", {
         description: "Pending invitation removed.",

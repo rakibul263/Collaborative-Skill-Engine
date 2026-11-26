@@ -76,93 +76,8 @@ const registerAuthRoutes = (app, {
 
       const token = jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "7d" });
 
-      const now = new Date();
-      const curLocation = resolveGeoLocation(clientIp);
-
-      // Check for Impossible Travel Anomaly against user's previous successful login
-      let travelAnomaly = null;
-      if (userLoginLogsCollection) {
-        try {
-          const prevLogin = await userLoginLogsCollection.findOne(
-            { email, status: "SUCCESS" },
-            { sort: { timestamp: -1 } }
-          );
-          if (prevLogin) {
-            const prevLocation = prevLogin.location || resolveGeoLocation(prevLogin.ip);
-            travelAnomaly = detectImpossibleTravel(
-              { ip: clientIp, location: curLocation, timestamp: now },
-              { ip: prevLogin.ip, location: prevLocation, timestamp: prevLogin.timestamp }
-            );
-          }
-        } catch (travelErr) {
-          console.error("[Auth] Impossible travel check error:", travelErr.message);
-        }
-      }
-
-      // If impossible travel detected, register an immediate admin intelligence security alert
-      if (travelAnomaly && adminSecurityAlertsCollection) {
-        const alertDoc = {
-          type: "IMPOSSIBLE_TRAVEL",
-          severity: travelAnomaly.severity || "CRITICAL",
-          status: "UNRESOLVED",
-          email,
-          fullName: userDoc?.fullName || decoded.name || "User",
-          userId: userDoc?._id?.toString() || null,
-          details: travelAnomaly.reason,
-          metrics: {
-            distanceKm: travelAnomaly.distanceKm,
-            timeDiffMinutes: travelAnomaly.timeDiffMinutes,
-            speedKmh: travelAnomaly.speedKmh,
-          },
-          previousLocation: travelAnomaly.previousLocation,
-          currentLocation: travelAnomaly.currentLocation,
-          timestamp: now,
-          createdAt: now.toISOString(),
-        };
-        await adminSecurityAlertsCollection.insertOne(alertDoc).catch(() => {});
-        if (io) {
-          io.emit("admin-security:new-alert", alertDoc);
-        }
-      }
-
-      // Log successful login with geolocation & anomaly tags
-      if (userLoginLogsCollection) {
-        await userLoginLogsCollection.insertOne({
-          userId: userDoc?._id?.toString() || null,
-          email,
-          fullName: userDoc?.fullName || decoded.name || "User",
-          role: userDoc?.role || "user",
-          ip: clientIp,
-          location: curLocation,
-          userAgent: req.headers["user-agent"] || "",
-          browser: deviceInfo.browser,
-          os: deviceInfo.os,
-          deviceType: deviceInfo.deviceType,
-          gateway: "Web Portal",
-          status: "SUCCESS",
-          isAnomaly: Boolean(travelAnomaly?.isAnomaly),
-          anomalyType: travelAnomaly ? "IMPOSSIBLE_TRAVEL" : null,
-          anomalyDetails: travelAnomaly || null,
-          timestamp: now,
-        }).catch((err) => console.error("[Auth] Log failed:", err.message));
-      }
-
-      // Update user lastLogin telemetry
-      if (userDoc?._id) {
-        await usersCollection.updateOne(
-          { _id: userDoc._id },
-          {
-            $set: {
-              lastLogin: now,
-              lastLoginIp: clientIp,
-              lastLoginLocation: curLocation,
-              lastLoginDevice: `${deviceInfo.browser} on ${deviceInfo.os}`,
-            },
-          }
-        ).catch(() => {});
-      }
-
-      return res.json({
+      // Return token immediately so login/token-exchange never stalls on telemetry writes
+      res.json({
         token,
         user: {
           uid: decoded.uid,
@@ -171,6 +86,96 @@ const registerAuthRoutes = (app, {
           photoURL: userDoc?.profileImage || decoded.picture || "",
         },
       });
+
+      // Fire-and-forget security & login telemetry
+      void (async () => {
+        try {
+          const now = new Date();
+          const curLocation = resolveGeoLocation(clientIp);
+          let travelAnomaly = null;
+
+          if (userLoginLogsCollection) {
+            try {
+              const prevLogin = await userLoginLogsCollection.findOne(
+                { email, status: "SUCCESS" },
+                { sort: { timestamp: -1 } }
+              );
+              if (prevLogin) {
+                const prevLocation = prevLogin.location || resolveGeoLocation(prevLogin.ip);
+                travelAnomaly = detectImpossibleTravel(
+                  { ip: clientIp, location: curLocation, timestamp: now },
+                  { ip: prevLogin.ip, location: prevLocation, timestamp: prevLogin.timestamp }
+                );
+              }
+            } catch (travelErr) {
+              console.error("[Auth] Impossible travel check error:", travelErr.message);
+            }
+          }
+
+          if (travelAnomaly && adminSecurityAlertsCollection) {
+            const alertDoc = {
+              type: "IMPOSSIBLE_TRAVEL",
+              severity: travelAnomaly.severity || "CRITICAL",
+              status: "UNRESOLVED",
+              email,
+              fullName: userDoc?.fullName || decoded.name || "User",
+              userId: userDoc?._id?.toString() || null,
+              details: travelAnomaly.reason,
+              metrics: {
+                distanceKm: travelAnomaly.distanceKm,
+                timeDiffMinutes: travelAnomaly.timeDiffMinutes,
+                speedKmh: travelAnomaly.speedKmh,
+              },
+              previousLocation: travelAnomaly.previousLocation,
+              currentLocation: travelAnomaly.currentLocation,
+              timestamp: now,
+              createdAt: now.toISOString(),
+            };
+            await adminSecurityAlertsCollection.insertOne(alertDoc).catch(() => {});
+            if (io) {
+              io.emit("admin-security:new-alert", alertDoc);
+            }
+          }
+
+          if (userLoginLogsCollection) {
+            await userLoginLogsCollection.insertOne({
+              userId: userDoc?._id?.toString() || null,
+              email,
+              fullName: userDoc?.fullName || decoded.name || "User",
+              role: userDoc?.role || "user",
+              ip: clientIp,
+              location: curLocation,
+              userAgent: req.headers["user-agent"] || "",
+              browser: deviceInfo.browser,
+              os: deviceInfo.os,
+              deviceType: deviceInfo.deviceType,
+              gateway: "Web Portal",
+              status: "SUCCESS",
+              isAnomaly: Boolean(travelAnomaly?.isAnomaly),
+              anomalyType: travelAnomaly ? "IMPOSSIBLE_TRAVEL" : null,
+              anomalyDetails: travelAnomaly || null,
+              timestamp: now,
+            }).catch((err) => console.error("[Auth] Log failed:", err.message));
+          }
+
+          if (userDoc?._id) {
+            await usersCollection.updateOne(
+              { _id: userDoc._id },
+              {
+                $set: {
+                  lastLogin: now,
+                  lastLoginIp: clientIp,
+                  lastLoginLocation: curLocation,
+                  lastLoginDevice: `${deviceInfo.browser} on ${deviceInfo.os}`,
+                },
+              }
+            ).catch(() => {});
+          }
+        } catch {
+          // non-blocking telemetry
+        }
+      })();
+      return;
     } catch (error) {
       console.error("[Auth] Token exchange failed:", error.message);
 

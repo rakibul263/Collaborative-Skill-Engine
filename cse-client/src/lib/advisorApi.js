@@ -121,7 +121,12 @@ export const streamAdvisorMessage = async ({ goal, message }, onToken, onDone, o
       }
     }
   } catch (err) {
-    onError?.(new Error(parseAdvisorError(err)));
+    const parsedErr = new Error(parseAdvisorError(err));
+    if (typeof onError === "function") {
+      onError(parsedErr);
+      return;
+    }
+    throw parsedErr;
   }
 };
 
@@ -178,6 +183,11 @@ export const streamInterviewTurn = async (
       }
     }
   } catch (err) {
-    onError?.(new Error(parseAdvisorError(err)));
+    const parsedErr = new Error(parseAdvisorError(err));
+    if (typeof onError === "function") {
+      onError(parsedErr);
+      return;
+    }
+    throw parsedErr;
   }
 };

@@ -1,6 +1,7 @@
 const jwt = require("jsonwebtoken");
+const { getFirebaseAdmin } = require("../config/firebaseAdmin");
 
-const verifyJWT = (req, res, next) => {
+const verifyJWT = async (req, res, next) => {
   const header = req.headers.authorization || "";
   const token = header.startsWith("Bearer ") ? header.slice(7).trim() : null;
 
@@ -15,10 +16,28 @@ const verifyJWT = (req, res, next) => {
       email: decoded.email.toLowerCase(),
       mongoId: decoded.mongoId || null,
     };
-    next();
-  } catch (error) {
+    return next();
+  } catch (jwtError) {
+    // Seamless fallback: if client passed a valid Firebase ID token (e.g. during cold start or token exchange race)
+    try {
+      const firebaseAdmin = getFirebaseAdmin();
+      if (firebaseAdmin) {
+        const fbDecoded = await firebaseAdmin.auth().verifyIdToken(token);
+        if (fbDecoded?.email) {
+          req.user = {
+            uid: fbDecoded.uid,
+            email: fbDecoded.email.toLowerCase(),
+            mongoId: null,
+          };
+          return next();
+        }
+      }
+    } catch {
+      // ignore Firebase fallback failure and report standard JWT error
+    }
+
     const message =
-      error.name === "TokenExpiredError"
+      jwtError.name === "TokenExpiredError"
         ? "Token expired. Please sign in again."
         : "Invalid token. Please sign in again.";
     return res.status(401).json({ message });

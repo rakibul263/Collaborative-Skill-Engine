@@ -20,7 +20,8 @@ import {
   FileDown,
 } from "lucide-react";
 import aiLogo from "@/assets/ai_advisor_logo.png";
-import axios from "axios";
+import apiClient from "@/lib/apiClient";
+import { getCachedData } from "@/lib/fastCache";
 import useAuth from "@/hooks/useAuth";
 import { Navigate, useLocation } from "react-router";
 import { FullScreenLoader } from "@/components/shared/loading/LoadingSpinner";
@@ -40,8 +41,6 @@ import { generateCareerIntelligence } from "@/lib/careerIntelligence";
 import { showConfirm } from "@/components/ui/confirm-dialog";
 import { toast } from "@/components/ui/toast-system";
 
-const API_URL = import.meta.env.VITE_API_URL || "http://localhost:3000";
-
 const QUICK_PROMPTS = [
   "What should I learn next for my profile?",
   "Perform a skill gap analysis on my profile",
@@ -52,12 +51,42 @@ const QUICK_PROMPTS = [
 const AiAdvisor = () => {
   const location = useLocation();
   const { user, loading: authLoading } = useAuth();
-  const [profile, setProfile] = useState(null);
-  const [history, setHistory] = useState([]);
+  const cachedProfile = user?.email
+    ? getCachedData(`/users?email=${encodeURIComponent(user.email)}`) || user?.dbUser || null
+    : null;
+  const cachedHistory = getCachedData("/ai-advisor/history")?.history || null;
+
+  const [profile, setProfile] = useState(() => cachedProfile);
+  const [history, setHistory] = useState(() =>
+    Array.isArray(cachedHistory)
+      ? cachedHistory.map((s) => ({
+          _id: s._id,
+          userMessage: s.userMessage,
+          reply: s.reply,
+          careerDirection: s.careerDirection,
+          goal: s.goal,
+          createdAt: s.createdAt,
+        }))
+      : []
+  );
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
-  const [loadingHistory, setLoadingHistory] = useState(true);
-  const [latestResponse, setLatestResponse] = useState(null);
+  const [loadingHistory, setLoadingHistory] = useState(() => !Array.isArray(cachedHistory));
+  const [latestResponse, setLatestResponse] = useState(() => {
+    const lastFull = Array.isArray(cachedHistory) ? cachedHistory.at(-1) : null;
+    if (!lastFull?.careerDirection) return null;
+    return {
+      reply: lastFull.reply,
+      careerDirection: lastFull.careerDirection,
+      skillGapAnalysis: lastFull.skillGapAnalysis,
+      learningRoadmap: lastFull.learningRoadmap,
+      suggestedProjects: lastFull.suggestedProjects,
+      recommendedSkills: lastFull.recommendedSkills,
+      prioritySteps: lastFull.prioritySteps,
+      mentorSuggestions: lastFull.mentorSuggestions,
+      courseSuggestions: lastFull.courseSuggestions || [],
+    };
+  });
   const [error, setError] = useState("");
 
   // Top Workspace Mode: "chat" (Claude Coach) | "studio" (Career Studio Dashboard)
@@ -80,18 +109,16 @@ const AiAdvisor = () => {
   const fetchProfile = useCallback(async () => {
     if (!user?.email) return;
     try {
-      const res = await axios.get(
-        `${API_URL}/users?email=${encodeURIComponent(user.email)}`
-      );
-      setProfile(res.data);
+      const res = await apiClient.get(`/users?email=${encodeURIComponent(user.email)}`);
+      if (res.data) setProfile(res.data);
     } catch {
-      setProfile(null);
+      setProfile((prev) => prev || user?.dbUser || null);
     }
   }, [user]);
 
   const loadHistory = useCallback(async () => {
     if (!user) return;
-    setLoadingHistory(true);
+    if (!getCachedData("/ai-advisor/history")) setLoadingHistory(true);
     try {
       const sessions = await fetchAdvisorHistory();
       setHistory(

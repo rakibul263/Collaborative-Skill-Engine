@@ -20,7 +20,8 @@ const createLimiter = (options) => {
  */
 const authLimiter = createLimiter({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 20, // Max 20 attempts per window per IP
+  max: 120, // Allow generous legitimate refreshes/re-logins behind NAT
+  skipSuccessfulRequests: true,
   message: {
     message: "Too many authentication attempts from this IP. Please try again after 15 minutes.",
     code: "AUTH_RATE_LIMIT_EXCEEDED",

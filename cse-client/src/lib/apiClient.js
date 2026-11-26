@@ -41,38 +41,59 @@ const isPublicNoBlockPath = (url = "") => {
   return PUBLIC_NO_AUTH_PREFIXES.some((prefix) => path.startsWith(prefix));
 };
 
+const getSettledFirebaseUser = async () => {
+  if (!auth) return null;
+  if (auth.currentUser) return auth.currentUser;
+  if (typeof auth.authStateReady === "function") {
+    try {
+      await Promise.race([
+        auth.authStateReady(),
+        new Promise((r) => setTimeout(r, 4000)),
+      ]);
+    } catch {
+      // ignore
+    }
+  }
+  return auth.currentUser || null;
+};
+
 export const exchangeToken = async () => {
   if (exchanging) return exchanging;
 
   exchanging = (async () => {
+    let firebaseToken = null;
     try {
-      const currentUser = auth?.currentUser;
+      const currentUser = await getSettledFirebaseUser();
       if (!currentUser) return null;
 
       // Use Firebase's cached valid ID token instead of forcing a network refresh every time
-      const firebaseToken = await currentUser.getIdToken();
-      let res;
-      try {
-        res = await axios.post(`${API_URL}/auth/token`, { firebaseToken }, { timeout: 30000 });
-      } catch (firstErr) {
-        const status = firstErr?.response?.status;
-        if (!status || status === 502 || status === 503 || status === 504) {
-          await new Promise((r) => setTimeout(r, 3000));
+      firebaseToken = await currentUser.getIdToken();
+      let res = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
           res = await axios.post(`${API_URL}/auth/token`, { firebaseToken }, { timeout: 30000 });
-        } else {
-          throw firstErr;
+          break;
+        } catch (err) {
+          const status = err?.response?.status;
+          const isTransient = !status || status === 404 || status === 429 || status === 502 || status === 503 || status === 504;
+          if (isTransient && attempt < 2) {
+            await new Promise((r) => setTimeout(r, 1800));
+            continue;
+          }
+          throw err;
         }
       }
 
-      if (res.data?.token) {
+      if (res?.data?.token) {
         setJWT(res.data.token);
         return res.data.token;
       }
-      return null;
+      return firebaseToken;
     } catch (error) {
       console.error("[apiClient] Token exchange failed:", error);
       clearJWT();
-      return null;
+      // Fall back to the Firebase ID token directly so verifyJWT can validate it seamlessly
+      return firebaseToken || null;
     } finally {
       exchanging = null;
     }
@@ -93,12 +114,15 @@ export const ensureAuthToken = async () => {
     token = null;
   }
 
-  const currentUser = auth?.currentUser;
+  const currentUser = await getSettledFirebaseUser();
   if (!currentUser) {
     throw new Error("You must be signed in to continue.");
   }
 
   token = await exchangeToken();
+  if (!token) {
+    token = await currentUser.getIdToken(true).catch(() => null);
+  }
   if (!token) {
     throw new Error(
       "Could not authenticate with the server. Please log out and sign in again.",
@@ -114,17 +138,24 @@ apiClient.interceptors.request.use(async (config) => {
   }
 
   let token = getJWT();
-  if ((!token || isTokenExpired(token)) && auth?.currentUser) {
+  if (!token || isTokenExpired(token)) {
     if (token && isTokenExpired(token)) clearJWT();
-    // Do not block public endpoints on token exchange; trigger exchange in background instead
+    token = null;
+
     if (isPublicNoBlockPath(config.url)) {
-      void exchangeToken();
+      if (auth?.currentUser) void exchangeToken();
     } else {
-      token = await exchangeToken();
+      const currentUser = await getSettledFirebaseUser();
+      if (currentUser) {
+        token = await exchangeToken();
+        if (!token) {
+          token = await currentUser.getIdToken().catch(() => null);
+        }
+      }
     }
   }
 
-  if (token && !isTokenExpired(token)) {
+  if (token) {
     config.headers.Authorization = `Bearer ${token}`;
   }
 
@@ -172,13 +203,14 @@ apiClient.interceptors.response.use(
     const original = error.config;
     const method = (original?.method || "get").toLowerCase();
     const status = error.response?.status;
-    const isColdStartTransient = !error.response || status === 502 || status === 503 || status === 504;
+    const isColdStartTransient =
+      !error.response || status === 404 || status === 429 || status === 502 || status === 503 || status === 504;
 
     if (original && method === "get" && isColdStartTransient) {
       original._coldRetryCount = original._coldRetryCount || 0;
       if (original._coldRetryCount < 3) {
         original._coldRetryCount += 1;
-        await new Promise((r) => setTimeout(r, 2500));
+        await new Promise((r) => setTimeout(r, 2000));
         return apiClient(original);
       }
     }
@@ -191,7 +223,11 @@ apiClient.interceptors.response.use(
     ) {
       original._retry = true;
       clearJWT();
-      const token = await exchangeToken();
+      let token = await exchangeToken();
+      if (!token) {
+        const fbUser = await getSettledFirebaseUser();
+        token = fbUser ? await fbUser.getIdToken(true).catch(() => null) : null;
+      }
       if (token) {
         original.headers.Authorization = `Bearer ${token}`;
         return apiClient(original);

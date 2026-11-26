@@ -221,47 +221,66 @@ const getSafeGeminiModelName = () => {
   return envModel;
 };
 
+const raceTimeout = (promise, ms, label) =>
+  Promise.race([
+    promise,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+    ),
+  ]);
+
 const invokeLLM = async (systemPrompt, userPrompt) => {
-  // 1. Primary: Google Gemini (High reasoning, multi-language Bengali/English, up-to-date)
+  // 1. Primary: Google Gemini with fast 12s timeout + no hidden thinking delay on 2.5
   if (process.env.GOOGLE_API_KEY) {
     try {
       const { GoogleGenerativeAI } = require("@google/generative-ai");
       const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
       const modelName = getSafeGeminiModelName();
-      const geminiModel = genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: {
-          responseMimeType: "application/json",
-          temperature: 0.25,
-        },
-      });
+      const baseCfg = { responseMimeType: "application/json", temperature: 0.25 };
+      const cfgAttempts = modelName.includes("2.5")
+        ? [{ ...baseCfg, thinkingConfig: { thinkingBudget: 0 } }, baseCfg]
+        : [baseCfg];
 
       const fullPrompt = `${systemPrompt}\n\n---\n${userPrompt}`;
-      const result = await geminiModel.generateContent(fullPrompt);
-      const text = result?.response?.text();
-      if (text) {
-        return {
-          content: text,
-          mode: `gemini (${modelName})+rag`,
-        };
+      for (const cfg of cfgAttempts) {
+        try {
+          const geminiModel = genAI.getGenerativeModel({ model: modelName, generationConfig: cfg });
+          const result = await raceTimeout(geminiModel.generateContent(fullPrompt), 12000, "Gemini");
+          const text = result?.response?.text();
+          if (text) {
+            return {
+              content: text,
+              mode: `gemini (${modelName})+rag`,
+            };
+          }
+        } catch (innerErr) {
+          if (String(innerErr?.message || "").toLowerCase().includes("thinking")) {
+            continue;
+          }
+          throw innerErr;
+        }
       }
     } catch (err) {
       console.warn("[AI Advisor] Gemini invocation failed, trying Groq fallback:", err.message);
     }
   }
 
-  // 2. Secondary: Groq LLM
+  // 2. Fast Fallback: Groq LLM
   if (process.env.GROQ_API_KEY) {
     try {
       const groqModel = new ChatGroq({
-        model: process.env.GROQ_MODEL || "llama-3.3-70b-versatile",
+        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
         temperature: 0.25,
         apiKey: process.env.GROQ_API_KEY,
       });
-      const completion = await groqModel.invoke([
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ]);
+      const completion = await raceTimeout(
+        groqModel.invoke([
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt },
+        ]),
+        12000,
+        "Groq"
+      );
       return {
         content: completion.content,
         mode: "groq+rag",
@@ -504,57 +523,102 @@ USER MESSAGE:
   let fullReply = "";
   let insightsRaw = "";
   let streamSuccess = false;
+  let streamMode = "gemini-stream+rag";
+
+  const processStreamToken = (text) => {
+    if (!text) return;
+    let cur = text;
+    if (!inReply && !inInsights && cur.includes("[REPLY]")) {
+      const parts = cur.split("[REPLY]");
+      cur = parts[1] || "";
+      inReply = true;
+    }
+
+    if (inReply) {
+      if (cur.includes("[/REPLY]")) {
+        const parts = cur.split("[/REPLY]");
+        const token = parts[0];
+        if (token) {
+          fullReply += token;
+          onToken?.(token);
+        }
+        inReply = false;
+        inInsights = true;
+        if (parts[1] && parts[1].includes("[INSIGHTS]")) {
+          insightsRaw += parts[1].split("[INSIGHTS]")[1] || "";
+        }
+      } else {
+        fullReply += cur;
+        onToken?.(cur);
+      }
+    } else if (inInsights) {
+      insightsRaw += cur;
+    } else {
+      fullReply += cur;
+      onToken?.(cur);
+    }
+  };
 
   if (process.env.GOOGLE_API_KEY) {
     try {
       const { GoogleGenerativeAI } = require("@google/generative-ai");
       const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
       const modelName = getSafeGeminiModelName();
-      const geminiModel = genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: { temperature: 0.25 },
-      });
+      const baseCfg = { temperature: 0.25 };
+      const cfgAttempts = modelName.includes("2.5")
+        ? [{ ...baseCfg, thinkingConfig: { thinkingBudget: 0 } }, baseCfg]
+        : [baseCfg];
 
-      const responseStream = await geminiModel.generateContentStream(prompt);
-
-      for await (const chunk of responseStream.stream) {
-        const text = chunk.text();
-        if (!text) continue;
-
-        let cur = text;
-        if (!inReply && !inInsights && cur.includes("[REPLY]")) {
-          const parts = cur.split("[REPLY]");
-          cur = parts[1] || "";
-          inReply = true;
-        }
-
-        if (inReply) {
-          if (cur.includes("[/REPLY]")) {
-            const parts = cur.split("[/REPLY]");
-            const token = parts[0];
-            if (token) {
-              fullReply += token;
-              onToken?.(token);
-            }
-            inReply = false;
-            inInsights = true;
-            if (parts[1] && parts[1].includes("[INSIGHTS]")) {
-              insightsRaw += parts[1].split("[INSIGHTS]")[1] || "";
-            }
-          } else {
-            fullReply += cur;
-            onToken?.(cur);
+      for (const cfg of cfgAttempts) {
+        try {
+          const geminiModel = genAI.getGenerativeModel({ model: modelName, generationConfig: cfg });
+          const responseStream = await raceTimeout(
+            geminiModel.generateContentStream(prompt),
+            8000,
+            "Gemini stream start"
+          );
+          for await (const chunk of responseStream.stream) {
+            processStreamToken(chunk.text());
           }
-        } else if (inInsights) {
-          insightsRaw += cur;
-        } else {
-          fullReply += cur;
-          onToken?.(cur);
+          if (fullReply.trim()) {
+            streamSuccess = true;
+            break;
+          }
+        } catch (innerErr) {
+          if (!fullReply && String(innerErr?.message || "").toLowerCase().includes("thinking")) {
+            continue;
+          }
+          throw innerErr;
         }
       }
-      streamSuccess = true;
     } catch (err) {
-      console.warn("[AI Advisor Stream] Gemini streaming failed:", err.message);
+      console.warn("[AI Advisor Stream] Gemini streaming failed, trying Groq stream:", err.message);
+    }
+  }
+
+  // Ultra-fast Groq streaming fallback (~300ms TTFT) if Gemini fails, throttles, or times out
+  if ((!streamSuccess || !fullReply) && process.env.GROQ_API_KEY) {
+    try {
+      inReply = false;
+      inInsights = false;
+      fullReply = "";
+      insightsRaw = "";
+      const groqModel = new ChatGroq({
+        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
+        temperature: 0.25,
+        apiKey: process.env.GROQ_API_KEY,
+      });
+      const stream = await groqModel.stream([{ role: "user", content: prompt }]);
+      for await (const chunk of stream) {
+        const text = typeof chunk?.content === "string" ? chunk.content : "";
+        processStreamToken(text);
+      }
+      if (fullReply.trim()) {
+        streamSuccess = true;
+        streamMode = "groq-stream+rag";
+      }
+    } catch (groqErr) {
+      console.warn("[AI Advisor Stream] Groq streaming failed:", groqErr.message);
     }
   }
 
@@ -607,7 +671,7 @@ USER MESSAGE:
     })),
     mentorSuggestions,
     retrievedSources: ragResult.chunks.map((c) => c.source),
-    mode: "gemini-stream+rag",
+    mode: streamMode,
   };
 };
 
@@ -685,22 +749,61 @@ const streamInterviewTurn = async ({
       const { GoogleGenerativeAI } = require("@google/generative-ai");
       const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
       const modelName = getSafeGeminiModelName();
-      const geminiModel = genAI.getGenerativeModel({
-        model: modelName,
-        generationConfig: { temperature: 0.35 },
-      });
+      const baseCfg = { temperature: 0.35 };
+      const cfgAttempts = modelName.includes("2.5")
+        ? [{ ...baseCfg, thinkingConfig: { thinkingBudget: 0 } }, baseCfg]
+        : [baseCfg];
 
-      const responseStream = await geminiModel.generateContentStream(prompt);
-      for await (const chunk of responseStream.stream) {
-        const text = chunk.text();
+      for (const cfg of cfgAttempts) {
+        try {
+          const geminiModel = genAI.getGenerativeModel({ model: modelName, generationConfig: cfg });
+          const responseStream = await raceTimeout(
+            geminiModel.generateContentStream(prompt),
+            8000,
+            "Mock interview Gemini stream"
+          );
+          for await (const chunk of responseStream.stream) {
+            const text = chunk.text();
+            if (text) {
+              fullReply += text;
+              onToken?.(text);
+            }
+          }
+          if (fullReply.trim()) {
+            return { success: true, reply: fullReply.trim() };
+          }
+        } catch (innerErr) {
+          if (!fullReply && String(innerErr?.message || "").toLowerCase().includes("thinking")) {
+            continue;
+          }
+          throw innerErr;
+        }
+      }
+    } catch (err) {
+      console.warn("[Mock Interview Stream] Gemini error, trying Groq stream:", err.message);
+    }
+  }
+
+  if (!fullReply && process.env.GROQ_API_KEY) {
+    try {
+      const groqModel = new ChatGroq({
+        model: process.env.GROQ_MODEL || "llama-3.1-8b-instant",
+        temperature: 0.35,
+        apiKey: process.env.GROQ_API_KEY,
+      });
+      const stream = await groqModel.stream([{ role: "user", content: prompt }]);
+      for await (const chunk of stream) {
+        const text = typeof chunk?.content === "string" ? chunk.content : "";
         if (text) {
           fullReply += text;
           onToken?.(text);
         }
       }
-      return { success: true, reply: fullReply.trim() };
-    } catch (err) {
-      console.warn("[Mock Interview Stream] Gemini error:", err.message);
+      if (fullReply.trim()) {
+        return { success: true, reply: fullReply.trim() };
+      }
+    } catch (groqErr) {
+      console.warn("[Mock Interview Stream] Groq error:", groqErr.message);
     }
   }
 

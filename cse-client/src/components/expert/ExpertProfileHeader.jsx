@@ -23,7 +23,7 @@ import {
 import { showConfirm } from "@/components/ui/confirm-dialog";
 import { toast } from "@/components/ui/toast-system";
 import { useNavigate } from "react-router";
-import axios from "axios";
+import apiClient from "@/lib/apiClient";
 import useAuth from "@/hooks/useAuth";
 
 const ExpertProfileHeader = ({
@@ -83,16 +83,13 @@ const ExpertProfileHeader = ({
 
     setLoading(true);
     try {
-      await axios.post(
-        `${import.meta.env.VITE_API_URL}/connections/requests`,
-        {
-          senderUid: authUser?.uid || authUser?._id,
-          senderEmail: authUser?.email,
-          senderName: authUser?.displayName || authUser?.name || "Learner",
-          senderImage: authUser?.photoURL || authUser?.profileImage || "",
-          receiverEmail: email,
-        }
-      );
+      await apiClient.post("/connections/requests", {
+        senderUid: authUser?.uid || authUser?._id,
+        senderEmail: authUser?.email,
+        senderName: authUser?.displayName || authUser?.name || "Learner",
+        senderImage: authUser?.photoURL || authUser?.profileImage || "",
+        receiverEmail: email,
+      });
 
       setConnectionStatus("sent");
       toast.confirmed("Mentorship Request Sent", {
@@ -122,12 +119,9 @@ const ExpertProfileHeader = ({
 
     setLoading(true);
     try {
-      await axios.delete(
-        `${import.meta.env.VITE_API_URL}/connections/requests/cancel`,
-        {
-          data: { senderEmail: authUser?.email, receiverEmail: email },
-        }
-      );
+      await apiClient.delete("/connections/requests/cancel", {
+        data: { senderEmail: authUser?.email, receiverEmail: email },
+      });
       setConnectionStatus("none");
       toast.deleted("Connection Request Withdrawn", {
         description: "Pending invitation cancelled.",

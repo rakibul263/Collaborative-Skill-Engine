@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { Navigate, useLocation } from "react-router";
 import { RefreshCw } from "lucide-react";
-import apiClient from "@/lib/apiClient";
+import apiClient, { ensureAuthToken } from "@/lib/apiClient";
 import useAuth from "@/hooks/useAuth";
 import StudioOnboardingView from "@/components/studio/StudioOnboardingView";
 import StudioSuccessCelebration from "@/components/studio/StudioSuccessCelebration";
@@ -52,9 +52,11 @@ const Studio = () => {
     }
     setError("");
 
-    for (let attempt = 0; attempt < 3; attempt++) {
+    await ensureAuthToken().catch(() => null);
+
+    for (let attempt = 0; attempt < 4; attempt++) {
       try {
-        const res = await apiClient.get("/studio/access-status", { timeout: 45000 });
+        const res = await apiClient.get("/studio/access-status", { timeout: 45000, forceRefresh: attempt > 0 });
         setAccessStatus(res.data);
         if (res.data) {
           try {
@@ -81,11 +83,37 @@ const Studio = () => {
         return;
       } catch (err) {
         const status = err?.response?.status;
-        if (attempt < 2 && (!status || status === 502 || status === 503 || status === 504 || status === 401)) {
-          await new Promise((r) => setTimeout(r, 2000));
+        if (
+          attempt < 3 &&
+          (!status || status === 401 || status === 404 || status === 429 || status === 502 || status === 503 || status === 504)
+        ) {
+          await new Promise((r) => setTimeout(r, 1800));
+          await ensureAuthToken().catch(() => null);
           continue;
         }
         console.error("Fetch access status error:", err);
+        try {
+          const eligBackup = await apiClient.get("/courses/eligibility", { timeout: 25000 });
+          if (eligBackup?.data) {
+            const fallbackStatus = {
+              hasStudioAccess: Boolean(eligBackup.data.canCreateCourse),
+              isEligible: Boolean(eligBackup.data.canCreateCourse),
+              completion: eligBackup.data.completion || 0,
+              eligibleTopics: eligBackup.data.eligibleTopics || [],
+              allCompletedTopics: eligBackup.data.eligibleTopics || [],
+              requirements: [],
+              metrics: {
+                averageRating: eligBackup.data.averageRating || 0,
+                sessionCount: eligBackup.data.sessionCount || 0,
+              },
+            };
+            setAccessStatus(fallbackStatus);
+            setLoading(false);
+            return;
+          }
+        } catch {
+          // continue to error state below
+        }
         setAccessStatus((prev) => {
           if (!prev) {
             setError("Could not verify studio access status. Please try again.");

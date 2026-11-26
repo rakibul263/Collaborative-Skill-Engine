@@ -12,16 +12,59 @@ const createAiAdvisorController = (deps) => {
     coursesCollection,
   } = deps;
 
+  let approvedCoursesCache = null;
+  let approvedCoursesExpiresAt = 0;
+
+  const getCachedApprovedCourses = async () => {
+    if (!coursesCollection) return [];
+    if (approvedCoursesCache && Date.now() < approvedCoursesExpiresAt) {
+      return approvedCoursesCache;
+    }
+    const list = await coursesCollection
+      .find(
+        { status: { $in: ["approved", "active"] } },
+        {
+          projection: {
+            _id: 1,
+            title: 1,
+            topic: 1,
+            description: 1,
+            price: 1,
+            thumbnailUrl: 1,
+            instructorName: 1,
+            curriculum: 1,
+          },
+        }
+      )
+      .limit(30)
+      .toArray();
+    approvedCoursesCache = list;
+    approvedCoursesExpiresAt = Date.now() + 30000;
+    return list;
+  };
+
   const getUserOr404 = async (authUser, res) => {
-    const user = await usersCollection.findOne({ email: authUser.email });
+    const user = await usersCollection.findOne(
+      { email: authUser.email },
+      {
+        projection: {
+          uid: 1,
+          email: 1,
+          fullName: 1,
+          teachSkills: 1,
+          learnSkills: 1,
+          teachLevel: 1,
+          learnLevel: 1,
+          education: 1,
+          headline: 1,
+          bio: 1,
+          connections: 1,
+        },
+      }
+    );
     if (!user) {
       res.status(404).json({ message: "User not found. Complete profile registration first." });
       return null;
-    }
-    if (user.uid && authUser.uid && user.uid !== authUser.uid) {
-      console.warn(
-        `[AI Advisor] uid mismatch for ${authUser.email} — allowing by email`,
-      );
     }
     return user;
   };
@@ -38,18 +81,20 @@ const createAiAdvisorController = (deps) => {
       const userProfile = await getUserOr404(req.user, res);
       if (!userProfile) return;
 
-      const memoryContext = await buildMemoryContext({
-        aiAdvisorSessionsCollection,
-        conversationsCollection,
-        messagesCollection,
-        email,
-      });
-
-      const mentorSuggestions = await findMentorSuggestions({
-        usersCollection,
-        currentUser: userProfile,
-        limit: 5,
-      });
+      const [memoryContext, mentorSuggestions, approvedCourses] = await Promise.all([
+        buildMemoryContext({
+          aiAdvisorSessionsCollection,
+          conversationsCollection,
+          messagesCollection,
+          email,
+        }),
+        findMentorSuggestions({
+          usersCollection,
+          currentUser: userProfile,
+          limit: 5,
+        }),
+        getCachedApprovedCourses().catch(() => []),
+      ]);
 
       const responsePayload = await generateAdvisorResponse({
         userProfile,
@@ -82,13 +127,8 @@ const createAiAdvisorController = (deps) => {
 
       // Live Approved Course Recommendations from platform coursesCollection
       let courseSuggestions = [];
-      if (coursesCollection) {
+      if (approvedCourses.length > 0) {
         try {
-          const approvedCourses = await coursesCollection
-            .find({ status: { $in: ["approved", "active"] } })
-            .limit(30)
-            .toArray();
-
           if (approvedCourses.length > 0) {
             const tokens = [
               goal,
@@ -178,34 +218,32 @@ const createAiAdvisorController = (deps) => {
       const userProfile = await getUserOr404(req.user, res);
       if (!userProfile) return;
 
-      // Set SSE headers
+      // Set SSE headers immediately so browser stream opens with zero wait
       res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
       res.flushHeaders?.();
+      res.write(": connected\n\n");
 
-      const memoryContext = await buildMemoryContext({
-        aiAdvisorSessionsCollection,
-        conversationsCollection,
-        messagesCollection,
-        email,
-      });
-
-      const mentorSuggestions = await findMentorSuggestions({
-        usersCollection,
-        currentUser: userProfile,
-        limit: 5,
-      });
+      const [memoryContext, mentorSuggestions, approvedCourses] = await Promise.all([
+        buildMemoryContext({
+          aiAdvisorSessionsCollection,
+          conversationsCollection,
+          messagesCollection,
+          email,
+        }),
+        findMentorSuggestions({
+          usersCollection,
+          currentUser: userProfile,
+          limit: 5,
+        }),
+        getCachedApprovedCourses().catch(() => []),
+      ]);
 
       // Match approved courses
       let courseSuggestions = [];
-      if (coursesCollection) {
+      if (approvedCourses.length > 0) {
         try {
-          const approvedCourses = await coursesCollection
-            .find({ status: { $in: ["approved", "active"] } })
-            .limit(30)
-            .toArray();
-
           if (approvedCourses.length > 0) {
             const tokens = [
               goal,
