@@ -419,6 +419,7 @@ const VideoCallOverlay = ({
   const reconnectTimerRef = useRef(null);
   const manualReconnectRef = useRef(null);
   const resetPeerConnectionRef = useRef(null);
+  const onPartnerJoinedSignalRef = useRef(null);
   const peerCallStateRef = useRef("waiting");
   const hasCleanedUpRef = useRef(false);
 
@@ -1460,9 +1461,16 @@ const VideoCallOverlay = ({
           }
           track.onunmute = () => {
             setHasRemoteVideo(true);
+            if (remoteVideoRef.current && remoteVideoRef.current.srcObject !== incomingStream) {
+              remoteVideoRef.current.srcObject = incomingStream;
+            }
             remoteVideoRef.current?.play?.().catch(() => {});
           };
-          track.onended = () => setHasRemoteVideo(false);
+          track.onended = () => {
+            if (remoteCameraStreamRef.current === incomingStream) {
+              setHasRemoteVideo(false);
+            }
+          };
         }
       };
 
@@ -1482,6 +1490,20 @@ const VideoCallOverlay = ({
       if (!isMounted) return;
       hasConnectedOnce = false;
       buildPeerConnection(activeRtcConfig);
+    };
+
+    onPartnerJoinedSignalRef.current = () => {
+      if (!isMounted) return;
+      const pc = pcRef.current;
+      if (!pc || pc.signalingState === "closed") return;
+      if (getEffectiveIsCaller() && !pc.remoteDescription && pc.signalingState === "stable") {
+        if (!pc.localDescription) {
+          void sendOffer(pc);
+        } else if (Date.now() - lastOfferSentAt > 2500) {
+          localIceCandidatesRef.current = [];
+          void sendOffer(pc, { iceRestart: true });
+        }
+      }
     };
 
     const setupCall = async () => {
@@ -1747,6 +1769,7 @@ const VideoCallOverlay = ({
       if (isNewlyJoined) {
         playNotificationSound("chime");
         toast.success(`${user?.name || peerDisplayNameRef.current || "Partner"} joined the meeting!`);
+        onPartnerJoinedSignalRef.current?.();
       }
 
       if (ydocRef.current) {
@@ -3085,10 +3108,12 @@ const VideoCallOverlay = ({
                 </div>
               </div>
             ) : (
-              /* CASE C: DEFAULT ZOOM 2-PERSON VIDEO GALLERY */
-              <div className="flex-1 min-h-0 grid grid-cols-1 md:grid-cols-2 gap-4 items-center justify-center max-w-6xl w-full mx-auto">
-                {renderRemoteFaceTile("h-full min-h-[240px] max-h-[76vh]")}
-                {renderLocalFaceTile("h-full min-h-[240px] max-h-[76vh]")}
+              /* CASE C: PARTNER FULL-STAGE + COMPACT SELF CORNER PiP */
+              <div className="flex-1 min-h-0 relative flex flex-col max-w-6xl w-full mx-auto">
+                {renderRemoteFaceTile("flex-1 min-h-[260px] w-full h-full")}
+                <div className="absolute bottom-3 right-3 sm:bottom-4 sm:right-4 z-20 rounded-2xl shadow-2xl">
+                  {renderLocalFaceTile("w-28 h-20 sm:w-44 sm:h-28", true, !isDesktop)}
+                </div>
               </div>
             )}
           </div>
@@ -3106,9 +3131,9 @@ const VideoCallOverlay = ({
                 </div>
               </>
             ) : (
-              <div className="flex-1 min-h-0 grid grid-rows-2 gap-3">
+              <div className="flex-1 min-h-0 grid grid-rows-[2fr_1fr] gap-3">
                 {renderRemoteFaceTile("h-full min-h-0")}
-                {renderLocalFaceTile("h-full min-h-0")}
+                {renderLocalFaceTile("h-full min-h-0", true)}
               </div>
             )}
           </div>
