@@ -7,6 +7,8 @@ import Editor from "@monaco-editor/react";
 import { AnimatePresence, motion as Motion } from "framer-motion";
 import {
     Check,
+    ChevronDown,
+    ChevronUp,
     Clock,
     Code2,
     Copy,
@@ -18,6 +20,7 @@ import {
     Minimize2,
     Monitor,
     MonitorOff,
+    Move,
     PenTool,
     PhoneOff,
     Play,
@@ -36,10 +39,8 @@ import WhiteboardCanvas from "./WhiteboardCanvas";
 
 const resolveIceServers = () => {
   const defaultServers = [
-    { urls: "stun:stun.l.google.com:19302" },
-    { urls: "stun:stun1.l.google.com:19302" },
     { urls: "stun:stun.cloudflare.com:3478" },
-    { urls: "stun:openrelay.metered.ca:80" },
+    { urls: "stun:stun.l.google.com:19302" },
   ];
 
   if (import.meta.env.VITE_ICE_SERVERS) {
@@ -58,15 +59,9 @@ const resolveIceServers = () => {
       credential: import.meta.env.VITE_TURN_PASSWORD || "",
     });
   } else {
-    // Public TURN relays so calls connect reliably across mobile/CGNAT/strict NAT networks
     defaultServers.push(
       {
         urls: "turn:openrelay.metered.ca:80",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
-      {
-        urls: "turn:openrelay.metered.ca:443",
         username: "openrelayproject",
         credential: "openrelayproject",
       },
@@ -81,16 +76,50 @@ const resolveIceServers = () => {
   return defaultServers;
 };
 
+let cachedDynamicIceServers = null;
+let cachedIceExpiresAt = 0;
+let inFlightIceFetch = null;
+
+const fetchRuntimeIceServers = () => {
+  if (cachedDynamicIceServers && Date.now() < cachedIceExpiresAt) {
+    return Promise.resolve(cachedDynamicIceServers);
+  }
+  if (inFlightIceFetch) return inFlightIceFetch;
+  inFlightIceFetch = apiClient
+    .get("/rtc/ice-servers", { timeout: 2500 })
+    .then((r) => {
+      const servers =
+        Array.isArray(r?.data?.iceServers) && r.data.iceServers.length > 0
+          ? r.data.iceServers
+          : null;
+      if (servers) {
+        cachedDynamicIceServers = servers;
+        cachedIceExpiresAt = Date.now() + 5 * 60 * 1000;
+      }
+      return servers;
+    })
+    .catch(() => null)
+    .finally(() => {
+      inFlightIceFetch = null;
+    });
+  return inFlightIceFetch;
+};
+
+// Warm ICE cache immediately when module loads so first call has zero fetch delay
+if (typeof window !== "undefined") {
+  void fetchRuntimeIceServers();
+}
+
 const RTC_CONFIG = {
   iceServers: resolveIceServers(),
-  iceCandidatePoolSize: 6,
+  iceCandidatePoolSize: 1,
   bundlePolicy: "max-bundle",
   rtcpMuxPolicy: "require",
 };
 
 const LOW_LATENCY_VIDEO_CONSTRAINTS = {
-  width: { ideal: 960, max: 1280 },
-  height: { ideal: 540, max: 720 },
+  width: { ideal: 640, max: 854 },
+  height: { ideal: 360, max: 480 },
   frameRate: { ideal: 30, max: 30 },
 };
 
@@ -98,17 +127,16 @@ const LOW_LATENCY_AUDIO_CONSTRAINTS = {
   echoCancellation: true,
   noiseSuppression: true,
   autoGainControl: true,
-  latency: 0.01,
 };
 
-const applyLowLatencyReceiver = (receiver, kind) => {
+const applyLowLatencyReceiver = (receiver) => {
   if (!receiver) return;
   try {
     if ("playoutDelayHint" in receiver) {
-      receiver.playoutDelayHint = kind === "audio" ? 0.02 : 0.04;
+      receiver.playoutDelayHint = 0;
     }
     if ("jitterBufferTarget" in receiver) {
-      receiver.jitterBufferTarget = kind === "audio" ? 20 : 40;
+      receiver.jitterBufferTarget = 0;
     }
   } catch {
     // Browser may not support mutable receiver playout hints
@@ -123,18 +151,18 @@ const tuneSenderLowLatency = async (sender, mode = "camera") => {
       params.encodings = [{}];
     }
     if (mode === "audio") {
-      params.encodings[0].maxBitrate = 48_000;
+      params.encodings[0].maxBitrate = 40_000;
       params.encodings[0].priority = "high";
       params.encodings[0].networkPriority = "high";
     } else if (mode === "screen") {
       params.degradationPreference = "maintain-resolution";
-      params.encodings[0].maxBitrate = 1_800_000;
-      params.encodings[0].maxFramerate = 30;
+      params.encodings[0].maxBitrate = 1_200_000;
+      params.encodings[0].maxFramerate = 15;
       params.encodings[0].priority = "medium";
       params.encodings[0].networkPriority = "medium";
     } else {
       params.degradationPreference = "maintain-framerate";
-      params.encodings[0].maxBitrate = 900_000;
+      params.encodings[0].maxBitrate = 450_000;
       params.encodings[0].maxFramerate = 30;
       params.encodings[0].priority = "high";
       params.encodings[0].networkPriority = "high";
@@ -150,20 +178,24 @@ const preferLowLatencyVideoCodecs = (pc) => {
   try {
     const caps = RTCRtpReceiver.getCapabilities("video");
     if (!caps?.codecs?.length) return;
-    const isFastMime = (mime = "") => {
-      const m = mime.toLowerCase();
-      return m === "video/vp8" || m === "video/h264";
-    };
-    const fastCodecs = caps.codecs.filter((c) => isFastMime(c.mimeType));
+    const h264 = [];
+    const vp8 = [];
+    const other = [];
+    for (const c of caps.codecs) {
+      const m = (c.mimeType || "").toLowerCase();
+      if (m === "video/h264") h264.push(c);
+      else if (m === "video/vp8") vp8.push(c);
+      else other.push(c);
+    }
+    const fastCodecs = [...h264, ...vp8];
     if (fastCodecs.length === 0) return;
-    const otherCodecs = caps.codecs.filter((c) => !isFastMime(c.mimeType));
-    const ordered = [...fastCodecs, ...otherCodecs];
+    const ordered = [...fastCodecs, ...other];
 
     pc.getTransceivers().forEach((transceiver) => {
-      if (
-        transceiver.receiver?.track?.kind === "video" &&
-        typeof transceiver.setCodecPreferences === "function"
-      ) {
+      const isVideoTransceiver =
+        transceiver.receiver?.track?.kind === "video" ||
+        transceiver.sender?.track?.kind === "video";
+      if (isVideoTransceiver && typeof transceiver.setCodecPreferences === "function") {
         try {
           transceiver.setCodecPreferences(ordered);
         } catch {
@@ -173,6 +205,37 @@ const preferLowLatencyVideoCodecs = (pc) => {
     });
   } catch {
     // Ignore capability query failures
+  }
+};
+
+const optimizeSdpLowLatency = (sdp) => {
+  if (!sdp || typeof sdp !== "string") return sdp;
+  try {
+    const lines = sdp.split("\r\n");
+    const opusMatch = lines.find((l) => l.startsWith("a=rtpmap:") && /opus\/48000/i.test(l));
+    if (!opusMatch) return sdp;
+    const pt = opusMatch.slice("a=rtpmap:".length).split(" ")[0];
+    if (!pt) return sdp;
+
+    const fmtpPrefix = `a=fmtp:${pt} `;
+    let foundFmtp = false;
+    const updated = lines.map((line) => {
+      if (!line.startsWith(fmtpPrefix)) return line;
+      foundFmtp = true;
+      let out = line;
+      if (!/minptime=/i.test(out)) out += ";minptime=10";
+      if (!/useinbandfec=/i.test(out)) out += ";useinbandfec=1";
+      return out;
+    });
+    if (!foundFmtp) {
+      const rtpmapIdx = updated.findIndex((l) => l === opusMatch);
+      if (rtpmapIdx !== -1) {
+        updated.splice(rtpmapIdx + 1, 0, `a=fmtp:${pt} minptime=10;useinbandfec=1`);
+      }
+    }
+    return updated.join("\r\n");
+  } catch {
+    return sdp;
   }
 };
 
@@ -329,6 +392,9 @@ const VideoCallOverlay = ({
   // Fullscreen / Spotlight tile: null | "remote" | "local" | "remote-screen" | "local-screen"
   const [spotlightTile, setSpotlightTile] = useState(null);
   const [isBrowserFullscreen, setIsBrowserFullscreen] = useState(false);
+  const [isViewportFullscreen, setIsViewportFullscreen] = useState(false);
+  const [isPipCollapsed, setIsPipCollapsed] = useState(false);
+  const [pipOffset, setPipOffset] = useState({ x: 0, y: 0 });
 
   // ─── Code Editor & CRDT State ───
   const [language, setLanguage] = useState("javascript");
@@ -370,6 +436,8 @@ const VideoCallOverlay = ({
   const [remainingSecs, setRemainingSecs] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
   const [callEndedToast, setCallEndedToast] = useState(false);
+  const [peerCallState, setPeerCallState] = useState("waiting"); // "waiting" | "joined" | "left"
+  const [leftPeerName, setLeftPeerName] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
   const [reconnectSecsLeft, setReconnectSecsLeft] = useState(15);
 
@@ -389,10 +457,14 @@ const VideoCallOverlay = ({
   const pcRef = useRef(null);
   const pendingIceRef = useRef([]);
   const pendingOfferRef = useRef(null);
+  const pendingReadyRef = useRef(null);
+  const pipDragRef = useRef(null);
   const localIceCandidatesRef = useRef([]);
   const resolvedPeerEmailRef = useRef(peerEmail && peerEmail !== "group" ? peerEmail : "");
   const reconnectTimerRef = useRef(null);
   const manualReconnectRef = useRef(null);
+  const resetPeerConnectionRef = useRef(null);
+  const peerCallStateRef = useRef("waiting");
   const hasCleanedUpRef = useRef(false);
 
   // Stable refs to prevent WebRTC teardown on parent re-renders
@@ -518,11 +590,23 @@ const VideoCallOverlay = ({
 
   const currentUserNameRef = useRef(currentUserName);
   const currentUserImageRef = useRef(currentUserImage);
+  const peerDisplayNameRef = useRef(peerDisplayName);
+  const callMetaRef = useRef({
+    peerEmail,
+    scheduleId: schedule?._id || null,
+    scheduleTitle: schedule?.title || "Live Video Meeting",
+  });
 
   useEffect(() => {
     currentUserNameRef.current = currentUserName;
     currentUserImageRef.current = currentUserImage;
-  }, [currentUserName, currentUserImage]);
+    peerDisplayNameRef.current = peerDisplayName;
+    callMetaRef.current = {
+      peerEmail,
+      scheduleId: schedule?._id || null,
+      scheduleTitle: schedule?.title || "Live Video Meeting",
+    };
+  }, [currentUserName, currentUserImage, peerDisplayName, peerEmail, schedule?._id, schedule?.title]);
 
   const roomId = useMemo(() => {
     if (!schedule) return "room-live";
@@ -574,13 +658,23 @@ const VideoCallOverlay = ({
     return () => mq.removeEventListener("change", onChange);
   }, []);
 
-  // Listen to browser native fullscreen changes
+  // Listen to browser native fullscreen changes (standard + webkit for Safari)
   useEffect(() => {
     const onFsChange = () => {
-      setIsBrowserFullscreen(Boolean(document.fullscreenElement));
+      const fsActive = Boolean(
+        document.fullscreenElement || document.webkitFullscreenElement
+      );
+      setIsBrowserFullscreen(fsActive);
+      if (!fsActive) {
+        setIsViewportFullscreen(false);
+      }
     };
     document.addEventListener("fullscreenchange", onFsChange);
-    return () => document.removeEventListener("fullscreenchange", onFsChange);
+    document.addEventListener("webkitfullscreenchange", onFsChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", onFsChange);
+      document.removeEventListener("webkitfullscreenchange", onFsChange);
+    };
   }, []);
 
   // Callback refs that immediately bind srcObject + call .play() on mount
@@ -649,6 +743,9 @@ const VideoCallOverlay = ({
   }, [
     viewMode,
     isWorkspaceExpanded,
+    isBrowserFullscreen,
+    isViewportFullscreen,
+    isPipCollapsed,
     isDesktop,
     spotlightTile,
     isScreenSharing,
@@ -682,10 +779,131 @@ const VideoCallOverlay = ({
     [socket, getTargetPeer, roomId]
   );
 
+  const clearRemoteStreams = useCallback(() => {
+    if (remoteCameraStreamRef.current) {
+      remoteCameraStreamRef.current.getTracks().forEach((t) => {
+        t.onended = null;
+        t.onunmute = null;
+      });
+      remoteCameraStreamRef.current = null;
+    }
+    if (remoteScreenStreamRef.current) {
+      remoteScreenStreamRef.current.getTracks().forEach((t) => {
+        t.onended = null;
+      });
+      remoteScreenStreamRef.current = null;
+    }
+    if (remoteAudioStreamRef.current) {
+      remoteAudioStreamRef.current.getTracks().forEach((t) => {
+        t.onunmute = null;
+      });
+      remoteAudioStreamRef.current = null;
+    }
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (remoteScreenRef.current) remoteScreenRef.current.srcObject = null;
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
+    setHasRemoteVideo(false);
+    setHasRemoteScreen(false);
+    setRtcConnected(false);
+    setReconnecting(false);
+    setSpotlightTile((prev) =>
+      prev === "remote" || prev === "remote-screen" ? null : prev
+    );
+    setPeerMediaState({
+      isMuted: false,
+      isCameraOff: false,
+      isScreenSharing: false,
+      cameraStreamId: null,
+      screenStreamId: null,
+    });
+  }, []);
+
+  const setPeerCallStatus = useCallback((nextStatus) => {
+    peerCallStateRef.current = nextStatus;
+    setPeerCallState(nextStatus);
+  }, []);
+
+  const markRemotePeerJoined = useCallback(
+    (joinedUser) => {
+      const joinedEmail = String(joinedUser?.email || "").trim().toLowerCase();
+      const selfEmail = String(currentUserEmail || "").trim().toLowerCase();
+      if (joinedEmail && selfEmail && joinedEmail === selfEmail) return false;
+
+      if (joinedUser?.email && !resolvedPeerEmailRef.current) {
+        resolvedPeerEmailRef.current = joinedUser.email;
+      }
+      setCallEndedToast(false);
+      setLeftPeerName("");
+      const wasJoined = peerCallStateRef.current === "joined";
+      setPeerCallStatus("joined");
+
+      if (joinedUser?.email) {
+        setActivePeers((prev) => {
+          const exists = prev.some(
+            (p) => String(p?.email || "").trim().toLowerCase() === joinedEmail
+          );
+          if (exists) {
+            return prev.map((p) =>
+              String(p?.email || "").trim().toLowerCase() === joinedEmail
+                ? { ...p, ...joinedUser }
+                : p
+            );
+          }
+          return [...prev, joinedUser];
+        });
+      }
+      return !wasJoined;
+    },
+    [currentUserEmail, setPeerCallStatus]
+  );
+
+  const handleRemotePeerLeft = useCallback(
+    (leavingUser) => {
+      const leavingEmail = String(leavingUser?.email || "").trim().toLowerCase();
+      const selfEmail = String(currentUserEmail || "").trim().toLowerCase();
+      if (leavingEmail && selfEmail && leavingEmail === selfEmail) return;
+
+      setActivePeers((prev) =>
+        leavingEmail
+          ? prev.filter(
+              (p) => String(p?.email || "").trim().toLowerCase() !== leavingEmail
+            )
+          : []
+      );
+      if (leavingEmail) {
+        setRemoteCursors((prev) => {
+          const next = { ...prev };
+          Object.keys(next).forEach((k) => {
+            if (k.toLowerCase() === leavingEmail) delete next[k];
+          });
+          return next;
+        });
+      }
+
+      clearRemoteStreams();
+      pendingOfferRef.current = null;
+      pendingIceRef.current = [];
+      localIceCandidatesRef.current = [];
+      resetPeerConnectionRef.current?.();
+
+      const alreadyLeft = peerCallStateRef.current === "left";
+      const hadJoinedBefore = peerCallStateRef.current === "joined";
+      if (!alreadyLeft && (hadJoinedBefore || Boolean(leavingEmail))) {
+        const name = leavingUser?.name || peerDisplayNameRef.current || "Partner";
+        setLeftPeerName(name);
+        setPeerCallStatus("left");
+        setCallEndedToast(true);
+        toast.error(`${name} left the call`);
+      }
+    },
+    [currentUserEmail, clearRemoteStreams, setPeerCallStatus]
+  );
+
   // ─── WebRTC Cleanup ──────────────────────────────────────────────────────────
   const cleanup = useCallback(() => {
     if (hasCleanedUpRef.current) return;
     hasCleanedUpRef.current = true;
+    resetPeerConnectionRef.current = null;
 
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -705,9 +923,19 @@ const VideoCallOverlay = ({
 
     if (document.fullscreenElement) {
       document.exitFullscreen().catch(() => {});
+    } else if (document.webkitFullscreenElement) {
+      try {
+        document.webkitExitFullscreen?.();
+      } catch {
+        // ignore safari exit error
+      }
     }
 
     if (pcRef.current) {
+      pcRef.current.onicecandidate = null;
+      pcRef.current.oniceconnectionstatechange = null;
+      pcRef.current.onconnectionstatechange = null;
+      pcRef.current.ontrack = null;
       pcRef.current.close();
       pcRef.current = null;
     }
@@ -734,6 +962,7 @@ const VideoCallOverlay = ({
     initialOfferProcessedRef.current = false;
     pendingIceRef.current = [];
     pendingOfferRef.current = null;
+    pendingReadyRef.current = null;
     localIceCandidatesRef.current = [];
     resolvedPeerEmailRef.current = peerEmail && peerEmail !== "group" ? peerEmail : "";
     let isMounted = true;
@@ -770,7 +999,14 @@ const VideoCallOverlay = ({
           pc.restartIce();
         }
         const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
-        await pc.setLocalDescription(offer);
+        try {
+          await pc.setLocalDescription({
+            type: offer.type,
+            sdp: optimizeSdpLowLatency(offer.sdp),
+          });
+        } catch {
+          await pc.setLocalDescription(offer);
+        }
         socket.emit("rtc:offer", {
           to: target,
           roomId,
@@ -848,7 +1084,14 @@ const VideoCallOverlay = ({
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         await flushPendingIce(pc);
         const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
+        try {
+          await pc.setLocalDescription({
+            type: answer.type,
+            sdp: optimizeSdpLowLatency(answer.sdp),
+          });
+        } catch {
+          await pc.setLocalDescription(answer);
+        }
         socket?.emit("rtc:answer", {
           to: resolvedPeerEmailRef.current || from || getTargetPeer(),
           roomId,
@@ -863,6 +1106,9 @@ const VideoCallOverlay = ({
 
     const onRtcOffer = ({ offer, from }) => {
       if (from && currentUserEmail && from.toLowerCase() === currentUserEmail.toLowerCase()) return;
+      if (from) {
+        markRemotePeerJoined({ email: from });
+      }
       handleIncomingOffer(offer, from);
     };
 
@@ -897,11 +1143,14 @@ const VideoCallOverlay = ({
 
     const onRtcReady = ({ from, forceOffer }) => {
       if (from && currentUserEmail && from.toLowerCase() === currentUserEmail.toLowerCase()) return;
-      if (from && !resolvedPeerEmailRef.current) {
-        resolvedPeerEmailRef.current = from;
+      if (from) {
+        markRemotePeerJoined({ email: from });
       }
       const pc = pcRef.current;
-      if (!pc) return;
+      if (!pc) {
+        pendingReadyRef.current = { from, forceOffer };
+        return;
+      }
       emitMediaState();
 
       const target = resolvedPeerEmailRef.current || from || getTargetPeer();
@@ -943,6 +1192,9 @@ const VideoCallOverlay = ({
       if (from && !resolvedPeerEmailRef.current) {
         resolvedPeerEmailRef.current = from;
       }
+      if (from && peerCallStateRef.current !== "left") {
+        markRemotePeerJoined({ email: from });
+      }
       setPeerMediaState({
         isMuted: Boolean(pm),
         isCameraOff: Boolean(pcam),
@@ -960,9 +1212,7 @@ const VideoCallOverlay = ({
 
     const onRtcEnded = ({ from }) => {
       if (from && currentUserEmail && from.toLowerCase() === currentUserEmail.toLowerCase()) return;
-      setCallEndedToast(true);
-      cleanup();
-      setTimeout(() => onCloseRef.current?.(), 1500);
+      handleRemotePeerLeft(from ? { email: from } : {});
     };
 
     const onSocketReconnect = () => {
@@ -1006,15 +1256,267 @@ const VideoCallOverlay = ({
       socket.on("connect", onSocketReconnect);
     }
 
+    let activeRtcConfig = cachedDynamicIceServers
+      ? { ...RTC_CONFIG, iceServers: cachedDynamicIceServers }
+      : RTC_CONFIG;
+
+    const buildPeerConnection = (rtcConfig = activeRtcConfig) => {
+      if (pcRef.current) {
+        pcRef.current.onicecandidate = null;
+        pcRef.current.oniceconnectionstatechange = null;
+        pcRef.current.onconnectionstatechange = null;
+        pcRef.current.ontrack = null;
+        try {
+          pcRef.current.close();
+        } catch {
+          // ignore
+        }
+        pcRef.current = null;
+      }
+
+      const pc = new RTCPeerConnection(rtcConfig);
+      pcRef.current = pc;
+
+      const localStream = streamRef.current;
+      if (localStream) {
+        localStream.getTracks().forEach((track) => {
+          const sender = pc.addTrack(track, localStream);
+          tuneSenderLowLatency(sender, track.kind === "audio" ? "audio" : "camera");
+        });
+      }
+
+      const localScreen = screenStreamRef.current;
+      if (localScreen) {
+        const screenTrack = localScreen.getVideoTracks()[0];
+        if (screenTrack && screenTrack.readyState === "live") {
+          screenSenderRef.current = pc.addTrack(screenTrack, localScreen);
+          tuneSenderLowLatency(screenSenderRef.current, "screen");
+        }
+      }
+
+      if (!localStream || localStream.getVideoTracks().length === 0) {
+        try {
+          pc.addTransceiver("video", { direction: "recvonly" });
+        } catch {
+          // ignore
+        }
+      }
+      if (!localStream || localStream.getAudioTracks().length === 0) {
+        try {
+          pc.addTransceiver("audio", { direction: "recvonly" });
+        } catch {
+          // ignore
+        }
+      }
+
+      preferLowLatencyVideoCodecs(pc);
+
+      pc.onicecandidate = (e) => {
+        if (e.candidate && socket) {
+          localIceCandidatesRef.current.push(e.candidate);
+          socket.emit("rtc:ice-candidate", {
+            to: getTargetPeer(),
+            roomId,
+            from: currentUserEmail,
+            candidate: e.candidate,
+          });
+        }
+      };
+
+      pc.oniceconnectionstatechange = () => {
+        const iceState = pc.iceConnectionState;
+        if (iceState === "connected" || iceState === "completed") {
+          setRtcConnected(true);
+          setReconnecting(false);
+          setErrorMsg(null);
+          if (peerCallStateRef.current !== "joined") {
+            setPeerCallStatus("joined");
+            setCallEndedToast(false);
+          }
+          if (disconnectIceRestartTimeout) {
+            clearTimeout(disconnectIceRestartTimeout);
+            disconnectIceRestartTimeout = null;
+          }
+        } else if (iceState === "failed") {
+          requestIceRecovery(false);
+        } else if (iceState === "disconnected") {
+          if (disconnectIceRestartTimeout) clearTimeout(disconnectIceRestartTimeout);
+          disconnectIceRestartTimeout = setTimeout(() => {
+            if (
+              pcRef.current &&
+              (pcRef.current.iceConnectionState === "disconnected" ||
+                pcRef.current.iceConnectionState === "failed")
+            ) {
+              requestIceRecovery(false);
+            }
+          }, 1500);
+        }
+      };
+
+      pc.ontrack = (e) => {
+        const track = e.track;
+        applyLowLatencyReceiver(e.receiver, track.kind);
+        const incomingStream = e.streams?.[0] || new MediaStream([track]);
+        const streamId = incomingStream.id;
+
+        if (peerCallStateRef.current !== "joined") {
+          setPeerCallStatus("joined");
+          setCallEndedToast(false);
+          setLeftPeerName("");
+        }
+
+        if (track.kind === "audio") {
+          if (!remoteAudioStreamRef.current) {
+            remoteAudioStreamRef.current = new MediaStream([track]);
+          } else if (!remoteAudioStreamRef.current.getAudioTracks().some((t) => t.id === track.id)) {
+            remoteAudioStreamRef.current.addTrack(track);
+          }
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = remoteAudioStreamRef.current;
+            remoteAudioRef.current.play?.().catch(() => {});
+          }
+          track.onunmute = () => {
+            if (remoteAudioRef.current) {
+              remoteAudioRef.current.play?.().catch(() => {});
+            }
+          };
+          return;
+        }
+
+        const peerState = peerMediaStateRef.current;
+        const existingCamTrack = remoteCameraStreamRef.current?.getVideoTracks()?.[0];
+        const isExplicitScreenStream =
+          Boolean(peerState.screenStreamId && streamId === peerState.screenStreamId);
+        const isSecondVideoWhileSharing =
+          Boolean(
+            peerState.isScreenSharing &&
+              existingCamTrack &&
+              existingCamTrack.readyState === "live" &&
+              existingCamTrack.id !== track.id
+          );
+
+        if (isExplicitScreenStream || isSecondVideoWhileSharing) {
+          remoteScreenStreamRef.current = incomingStream;
+          setHasRemoteScreen(true);
+          setSpotlightTile("remote-screen");
+          if (remoteScreenRef.current) {
+            remoteScreenRef.current.srcObject = incomingStream;
+            remoteScreenRef.current.play?.().catch(() => {});
+          }
+          track.onended = () => {
+            remoteScreenStreamRef.current = null;
+            setHasRemoteScreen(false);
+            setSpotlightTile((prev) => (prev === "remote-screen" ? null : prev));
+          };
+        } else {
+          remoteCameraStreamRef.current = incomingStream;
+          setHasRemoteVideo(true);
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = incomingStream;
+            remoteVideoRef.current.play?.().catch(() => {});
+          }
+          track.onunmute = () => {
+            setHasRemoteVideo(true);
+            remoteVideoRef.current?.play?.().catch(() => {});
+          };
+          track.onended = () => setHasRemoteVideo(false);
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        const state = pc.connectionState;
+        if (state === "connected") {
+          setRtcConnected(true);
+          setReconnecting(false);
+          setErrorMsg(null);
+          if (disconnectIceRestartTimeout) {
+            clearTimeout(disconnectIceRestartTimeout);
+            disconnectIceRestartTimeout = null;
+          }
+          if (readyRetryInterval) {
+            clearInterval(readyRetryInterval);
+            readyRetryInterval = null;
+          }
+          if (reconnectTimerRef.current) {
+            clearInterval(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+          }
+        } else if (state === "disconnected" || state === "failed") {
+          setRtcConnected(false);
+          if (peerCallStateRef.current === "left") {
+            return;
+          }
+          setReconnecting(true);
+          const totalGraceSecs = 20;
+          setReconnectSecsLeft(totalGraceSecs);
+
+          if (state === "failed") {
+            requestIceRecovery(false);
+          } else {
+            if (disconnectIceRestartTimeout) clearTimeout(disconnectIceRestartTimeout);
+            disconnectIceRestartTimeout = setTimeout(() => {
+              if (
+                pcRef.current &&
+                (pcRef.current.connectionState === "disconnected" ||
+                  pcRef.current.connectionState === "failed")
+              ) {
+                requestIceRecovery(false);
+              }
+            }, 1500);
+          }
+
+          let secsLeft = totalGraceSecs;
+          if (reconnectTimerRef.current) clearInterval(reconnectTimerRef.current);
+          const countdown = setInterval(() => {
+            secsLeft -= 1;
+            setReconnectSecsLeft(secsLeft);
+            if (secsLeft === 10 || secsLeft === 5) {
+              if (
+                pcRef.current &&
+                (pcRef.current.connectionState === "disconnected" ||
+                  pcRef.current.connectionState === "failed")
+              ) {
+                requestIceRecovery(false);
+              }
+            }
+            if (secsLeft <= 0) {
+              clearInterval(countdown);
+              if (
+                pcRef.current &&
+                (pcRef.current.connectionState === "disconnected" ||
+                  pcRef.current.connectionState === "failed")
+              ) {
+                setErrorMsg("Video connection dropped. Collaboration tools remain active.");
+                setReconnecting(false);
+              }
+            }
+          }, 1000);
+          reconnectTimerRef.current = countdown;
+        }
+      };
+
+      return pc;
+    };
+
+    resetPeerConnectionRef.current = () => {
+      if (!isMounted) return;
+      buildPeerConnection(activeRtcConfig);
+    };
+
     const setupCall = async () => {
-      // Fetch server ICE/TURN servers concurrently with media acquisition (max 1.2s non-blocking)
-      const runtimeIcePromise = Promise.race([
-        apiClient
-          .get("/rtc/ice-servers", { timeout: 2500 })
-          .then((r) => (Array.isArray(r?.data?.iceServers) && r.data.iceServers.length > 0 ? r.data.iceServers : null))
-          .catch(() => null),
-        new Promise((resolve) => setTimeout(() => resolve(null), 1200)),
-      ]);
+      // Pre-fetch dynamic TURN/ICE in background without stalling media setup
+      void fetchRuntimeIceServers().then((dynamicIceServers) => {
+        if (!isMounted || !dynamicIceServers) return;
+        activeRtcConfig = { ...RTC_CONFIG, iceServers: dynamicIceServers };
+        const pc = pcRef.current;
+        if (pc && pc.connectionState !== "closed" && typeof pc.setConfiguration === "function") {
+          try {
+            pc.setConfiguration(activeRtcConfig);
+          } catch {
+            // Browser rejected runtime ICE config update
+          }
+        }
+      });
 
       let stream = null;
       try {
@@ -1043,11 +1545,6 @@ const VideoCallOverlay = ({
         }
       }
 
-      const dynamicIceServers = await runtimeIcePromise;
-      const effectiveRtcConfig = dynamicIceServers
-        ? { ...RTC_CONFIG, iceServers: dynamicIceServers }
-        : RTC_CONFIG;
-
       if (!isMounted) {
         stream?.getTracks().forEach((t) => t.stop());
         return;
@@ -1071,241 +1568,52 @@ const VideoCallOverlay = ({
         }
       }
 
-      const pc = new RTCPeerConnection(effectiveRtcConfig);
-      pcRef.current = pc;
+      const pc = buildPeerConnection(activeRtcConfig);
 
-      if (stream) {
-        stream.getTracks().forEach((track) => {
-          const sender = pc.addTrack(track, stream);
-          tuneSenderLowLatency(sender, track.kind === "audio" ? "audio" : "camera");
+      if (socket) {
+        socket.emit("rtc:ready", {
+          to: getTargetPeer(),
+          roomId,
+          from: currentUserEmail,
+          scheduleId: schedule?._id,
         });
-      }
+        emitMediaState();
 
-      if (!stream || stream.getVideoTracks().length === 0) {
-        try {
-          pc.addTransceiver("video", { direction: "recvonly" });
-        } catch {
-          // ignore
-        }
-      }
-      if (!stream || stream.getAudioTracks().length === 0) {
-        try {
-          pc.addTransceiver("audio", { direction: "recvonly" });
-        } catch {
-          // ignore
-        }
-      }
+        const queuedReady = pendingReadyRef.current;
+        pendingReadyRef.current = null;
 
-      preferLowLatencyVideoCodecs(pc);
-
-      pc.onicecandidate = (e) => {
-        if (e.candidate && socket) {
-          localIceCandidatesRef.current.push(e.candidate);
-          socket.emit("rtc:ice-candidate", {
-            to: getTargetPeer(),
-            roomId,
-            from: currentUserEmail,
-            candidate: e.candidate,
-          });
-        }
-      };
-
-      pc.oniceconnectionstatechange = () => {
-        const iceState = pc.iceConnectionState;
-        if (iceState === "connected" || iceState === "completed") {
-          setRtcConnected(true);
-          setReconnecting(false);
-          setErrorMsg(null);
-          if (disconnectIceRestartTimeout) {
-            clearTimeout(disconnectIceRestartTimeout);
-            disconnectIceRestartTimeout = null;
+        if (pendingOfferRef.current?.offer) {
+          const { offer, from } = pendingOfferRef.current;
+          pendingOfferRef.current = null;
+          await handleIncomingOffer(offer, from);
+        } else if (initialOfferRef.current?.offer && !initialOfferProcessedRef.current) {
+          initialOfferProcessedRef.current = true;
+          if (initialOfferRef.current.from) {
+            markRemotePeerJoined({ email: initialOfferRef.current.from });
           }
-        } else if (iceState === "failed") {
-          requestIceRecovery(false);
-        } else if (iceState === "disconnected") {
-          if (disconnectIceRestartTimeout) clearTimeout(disconnectIceRestartTimeout);
-          disconnectIceRestartTimeout = setTimeout(() => {
-            if (
-              pcRef.current &&
-              (pcRef.current.iceConnectionState === "disconnected" ||
-                pcRef.current.iceConnectionState === "failed")
-            ) {
-              requestIceRecovery(false);
-            }
-          }, 3000);
-        }
-      };
-
-        pc.ontrack = (e) => {
-          const track = e.track;
-          applyLowLatencyReceiver(e.receiver, track.kind);
-          const incomingStream = e.streams?.[0] || new MediaStream([track]);
-          const streamId = incomingStream.id;
-
-          if (track.kind === "audio") {
-            if (!remoteAudioStreamRef.current) {
-              remoteAudioStreamRef.current = new MediaStream([track]);
-            } else if (!remoteAudioStreamRef.current.getAudioTracks().some((t) => t.id === track.id)) {
-              remoteAudioStreamRef.current.addTrack(track);
-            }
-            if (remoteAudioRef.current) {
-              remoteAudioRef.current.srcObject = remoteAudioStreamRef.current;
-              remoteAudioRef.current.play?.().catch(() => {});
-            }
-            track.onunmute = () => {
-              if (remoteAudioRef.current) {
-                remoteAudioRef.current.play?.().catch(() => {});
-              }
-            };
-            return;
-          }
-
-          const peerState = peerMediaStateRef.current;
-          const existingCamTrack = remoteCameraStreamRef.current?.getVideoTracks()?.[0];
-          const isExplicitScreenStream =
-            Boolean(peerState.screenStreamId && streamId === peerState.screenStreamId);
-          const isSecondVideoWhileSharing =
-            Boolean(
-              peerState.isScreenSharing &&
-                existingCamTrack &&
-                existingCamTrack.readyState === "live" &&
-                existingCamTrack.id !== track.id
-            );
-
-          if (isExplicitScreenStream || isSecondVideoWhileSharing) {
-            remoteScreenStreamRef.current = incomingStream;
-            setHasRemoteScreen(true);
-            setSpotlightTile("remote-screen");
-            if (remoteScreenRef.current) {
-              remoteScreenRef.current.srcObject = incomingStream;
-              remoteScreenRef.current.play?.().catch(() => {});
-            }
-            track.onended = () => {
-              remoteScreenStreamRef.current = null;
-              setHasRemoteScreen(false);
-              setSpotlightTile((prev) => (prev === "remote-screen" ? null : prev));
-            };
-          } else {
-            remoteCameraStreamRef.current = incomingStream;
-            setHasRemoteVideo(true);
-            if (remoteVideoRef.current) {
-              remoteVideoRef.current.srcObject = incomingStream;
-              remoteVideoRef.current.play?.().catch(() => {});
-            }
-            track.onunmute = () => {
-              setHasRemoteVideo(true);
-              remoteVideoRef.current?.play?.().catch(() => {});
-            };
-            track.onended = () => setHasRemoteVideo(false);
-          }
-        };
-
-        pc.onconnectionstatechange = () => {
-          const state = pc.connectionState;
-          if (state === "connected") {
-            setRtcConnected(true);
-            setReconnecting(false);
-            setErrorMsg(null);
-            if (disconnectIceRestartTimeout) {
-              clearTimeout(disconnectIceRestartTimeout);
-              disconnectIceRestartTimeout = null;
-            }
-            if (readyRetryInterval) {
+          await handleIncomingOffer(initialOfferRef.current.offer, initialOfferRef.current.from);
+        } else if (queuedReady) {
+          onRtcReady(queuedReady);
+        } else if (getEffectiveIsCaller()) {
+          await sendOffer(pc);
+        } else {
+          let retries = 0;
+          readyRetryInterval = setInterval(() => {
+            retries += 1;
+            if (!pcRef.current || pcRef.current.remoteDescription || retries >= 20) {
               clearInterval(readyRetryInterval);
               readyRetryInterval = null;
+              return;
             }
-            if (reconnectTimerRef.current) {
-              clearInterval(reconnectTimerRef.current);
-              reconnectTimerRef.current = null;
-            }
-          } else if (state === "disconnected" || state === "failed") {
-            setRtcConnected(false);
-            setReconnecting(true);
-            const totalGraceSecs = 20;
-            setReconnectSecsLeft(totalGraceSecs);
-
-            // Attempt automatic bidirectional ICE restart quickly instead of passively waiting to drop
-            if (state === "failed") {
-              requestIceRecovery(false);
-            } else {
-              if (disconnectIceRestartTimeout) clearTimeout(disconnectIceRestartTimeout);
-              disconnectIceRestartTimeout = setTimeout(() => {
-                if (
-                  pcRef.current &&
-                  (pcRef.current.connectionState === "disconnected" ||
-                    pcRef.current.connectionState === "failed")
-                ) {
-                  requestIceRecovery(false);
-                }
-              }, 2500);
-            }
-
-            let secsLeft = totalGraceSecs;
-            if (reconnectTimerRef.current) clearInterval(reconnectTimerRef.current);
-            const countdown = setInterval(() => {
-              secsLeft -= 1;
-              setReconnectSecsLeft(secsLeft);
-              if (secsLeft === 10 || secsLeft === 5) {
-                if (
-                  pcRef.current &&
-                  (pcRef.current.connectionState === "disconnected" ||
-                    pcRef.current.connectionState === "failed")
-                ) {
-                  requestIceRecovery(false);
-                }
-              }
-              if (secsLeft <= 0) {
-                clearInterval(countdown);
-                if (
-                  pcRef.current &&
-                  (pcRef.current.connectionState === "disconnected" ||
-                    pcRef.current.connectionState === "failed")
-                ) {
-                  setErrorMsg("Video connection dropped. Collaboration tools remain active.");
-                  setReconnecting(false);
-                }
-              }
-            }, 1000);
-            reconnectTimerRef.current = countdown;
-          }
-        };
-
-        if (socket) {
-          socket.emit("rtc:ready", {
-            to: getTargetPeer(),
-            roomId,
-            from: currentUserEmail,
-            scheduleId: schedule?._id,
-          });
-          emitMediaState();
-
-          if (pendingOfferRef.current?.offer) {
-            const { offer, from } = pendingOfferRef.current;
-            pendingOfferRef.current = null;
-            await handleIncomingOffer(offer, from);
-          } else if (initialOfferRef.current?.offer && !initialOfferProcessedRef.current) {
-            initialOfferProcessedRef.current = true;
-            await handleIncomingOffer(initialOfferRef.current.offer, initialOfferRef.current.from);
-          } else if (getEffectiveIsCaller()) {
-            await sendOffer(pc);
-          } else {
-            let retries = 0;
-            readyRetryInterval = setInterval(() => {
-              retries += 1;
-              if (!pcRef.current || pcRef.current.remoteDescription || retries >= 20) {
-                clearInterval(readyRetryInterval);
-                readyRetryInterval = null;
-                return;
-              }
-              socket.emit("rtc:ready", {
-                to: getTargetPeer(),
-                roomId,
-                from: currentUserEmail,
-                scheduleId: schedule?._id,
-              });
-            }, 350);
-          }
+            socket.emit("rtc:ready", {
+              to: getTargetPeer(),
+              roomId,
+              from: currentUserEmail,
+              scheduleId: schedule?._id,
+            });
+          }, 150);
         }
+      }
     };
 
     setupCall();
@@ -1367,10 +1675,10 @@ const VideoCallOverlay = ({
 
     // Notify the scheduled partner / group members that we joined the call
     socket.emit("rtc:join-call", {
-      to: peerEmail,
+      to: callMetaRef.current.peerEmail,
       roomId,
-      scheduleId: schedule?._id || null,
-      scheduleTitle: schedule?.title || "Live Video Meeting",
+      scheduleId: callMetaRef.current.scheduleId,
+      scheduleTitle: callMetaRef.current.scheduleTitle,
       user: {
         email: currentUserEmail,
         name: currentUserNameRef.current,
@@ -1384,7 +1692,27 @@ const VideoCallOverlay = ({
       yjsUpdates,
       whiteboardStrokes: initStrokes,
       chatMessages: initChatMessages,
+      participants: initParticipants,
     }) => {
+      if (Array.isArray(initParticipants)) {
+        const selfEmail = String(currentUserEmail || "").trim().toLowerCase();
+        const remotePeers = initParticipants.filter((p) => {
+          const em = String(p?.email || "").trim().toLowerCase();
+          return em && em !== selfEmail;
+        });
+        setActivePeers(remotePeers);
+        if (remotePeers.length > 0) {
+          setCallEndedToast(false);
+          setLeftPeerName("");
+          setPeerCallStatus("joined");
+          if (remotePeers[0]?.email && !resolvedPeerEmailRef.current) {
+            resolvedPeerEmailRef.current = remotePeers[0].email;
+          }
+        } else if (peerCallStateRef.current !== "left") {
+          setPeerCallStatus("waiting");
+        }
+      }
+
       if (Array.isArray(yjsUpdates) && yjsUpdates.length > 0 && ydocRef.current) {
         yjsUpdates.forEach((upd) => {
           try {
@@ -1432,13 +1760,15 @@ const VideoCallOverlay = ({
     };
 
     const onPeerJoined = ({ socketId, user }) => {
-      if (user?.email === currentUserEmail) return;
-      playNotificationSound("chime");
-      toast.success(`${user?.name || "Partner"} joined the meeting!`);
-      setActivePeers((prev) => {
-        if (prev.some((p) => p.email === user?.email)) return prev;
-        return [...prev, user];
-      });
+      const joinedEmail = String(user?.email || "").trim().toLowerCase();
+      const selfEmail = String(currentUserEmail || "").trim().toLowerCase();
+      if (joinedEmail && selfEmail && joinedEmail === selfEmail) return;
+
+      const isNewlyJoined = markRemotePeerJoined(user);
+      if (isNewlyJoined) {
+        playNotificationSound("chime");
+        toast.success(`${user?.name || peerDisplayNameRef.current || "Partner"} joined the meeting!`);
+      }
 
       if (ydocRef.current) {
         const fullState = Array.from(Y.encodeStateAsUpdate(ydocRef.current));
@@ -1452,12 +1782,7 @@ const VideoCallOverlay = ({
     };
 
     const onPeerLeft = ({ user }) => {
-      setActivePeers((prev) => prev.filter((p) => p.email !== user?.email));
-      setRemoteCursors((prev) => {
-        const next = { ...prev };
-        delete next[user?.email];
-        return next;
-      });
+      handleRemotePeerLeft(user);
     };
 
     const onYjsUpdate = ({ update }) => {
@@ -1514,7 +1839,9 @@ const VideoCallOverlay = ({
     };
 
     const onWhiteboardStroke = ({ stroke, user }) => {
-      if (!stroke || user?.email === currentUserEmail) return;
+      const senderEmail = String(user?.email || "").trim().toLowerCase();
+      const selfEmail = String(currentUserEmail || "").trim().toLowerCase();
+      if (!stroke || (senderEmail && selfEmail && senderEmail === selfEmail)) return;
       setWhiteboardStrokes((prev) => {
         if (prev.some((s) => s.id === stroke.id)) return prev;
         return [...prev, stroke];
@@ -1588,11 +1915,20 @@ const VideoCallOverlay = ({
     socket.on("whiteboard:undo", onWhiteboardUndo);
     socket.on("whiteboard:clear", onWhiteboardClear);
 
-    return () => {
+    const emitLeaveRoom = () => {
       socket.emit("code:leave-room", {
         roomId,
         user: { email: currentUserEmail, name: currentUserNameRef.current },
       });
+    };
+
+    window.addEventListener("pagehide", emitLeaveRoom);
+    window.addEventListener("beforeunload", emitLeaveRoom);
+
+    return () => {
+      window.removeEventListener("pagehide", emitLeaveRoom);
+      window.removeEventListener("beforeunload", emitLeaveRoom);
+      emitLeaveRoom();
       socket.off("connect", joinRoom);
       socket.off("collab:room-init", onRoomInit);
       socket.off("collab:mode-change", onModeChange);
@@ -1617,7 +1953,16 @@ const VideoCallOverlay = ({
       ydoc.destroy();
       ydocRef.current = null;
     };
-  }, [socket, roomId, currentUserEmail, currentUserName, userColor]);
+  }, [
+    socket,
+    roomId,
+    currentUserEmail,
+    currentUserName,
+    userColor,
+    markRemotePeerJoined,
+    handleRemotePeerLeft,
+    setPeerCallStatus,
+  ]);
 
   // ─── Toggle Shared Workspace Mode (Video / Code / Whiteboard) ───────────────
   const handleSwitchMode = useCallback(
@@ -1640,17 +1985,113 @@ const VideoCallOverlay = ({
     [viewMode, socket, roomId, currentUserEmail, currentUserName]
   );
 
-  // ─── Toggle Full Screen Spotlight / Browser Fullscreen ──────────────────────
+  // ─── Toggle Full Screen Spotlight / Browser & iPad Viewport Fullscreen ──────
+  const isFullscreenActive = isBrowserFullscreen || isViewportFullscreen;
+  const isWhiteboardFullscreen =
+    viewMode === "whiteboard" && (isWorkspaceExpanded || isFullscreenActive);
+  const useFloatingPipLayout = isWorkspaceExpanded || isWhiteboardFullscreen || !isDesktop;
+
   const handleToggleTileFullscreen = (tileKey) => {
     setSpotlightTile((prev) => (prev === tileKey ? null : tileKey));
   };
 
-  const handleToggleBrowserFullscreen = () => {
-    if (!document.fullscreenElement) {
-      rootOverlayRef.current?.requestFullscreen?.().catch(() => {});
-    } else {
-      document.exitFullscreen?.().catch(() => {});
+  const enterFullscreen = async () => {
+    const target = rootOverlayRef.current;
+    try {
+      if (typeof target?.requestFullscreen === "function") {
+        await target.requestFullscreen();
+        setIsViewportFullscreen(true);
+        return;
+      }
+      if (typeof target?.webkitRequestFullscreen === "function") {
+        await target.webkitRequestFullscreen();
+        setIsViewportFullscreen(true);
+        return;
+      }
+    } catch {
+      // iPadOS Safari blocks Element.requestFullscreen on containers — fall back to 100dvh viewport fullscreen
     }
+    setIsViewportFullscreen(true);
+  };
+
+  const exitFullscreen = async () => {
+    try {
+      if (document.fullscreenElement && typeof document.exitFullscreen === "function") {
+        await document.exitFullscreen();
+      } else if (
+        document.webkitFullscreenElement &&
+        typeof document.webkitExitFullscreen === "function"
+      ) {
+        await document.webkitExitFullscreen();
+      }
+    } catch {
+      // ignore exit errors
+    }
+    setIsViewportFullscreen(false);
+  };
+
+  const handleToggleBrowserFullscreen = () => {
+    if (isFullscreenActive) {
+      setIsWorkspaceExpanded(false);
+      void exitFullscreen();
+    } else {
+      if (viewMode === "whiteboard") {
+        setIsWorkspaceExpanded(true);
+      }
+      void enterFullscreen();
+    }
+  };
+
+  const handleToggleWhiteboardFullscreen = () => {
+    if (isWhiteboardFullscreen) {
+      setIsWorkspaceExpanded(false);
+      setIsPipCollapsed(false);
+      setPipOffset({ x: 0, y: 0 });
+      void exitFullscreen();
+    } else {
+      setIsWorkspaceExpanded(true);
+      void enterFullscreen();
+    }
+  };
+
+  const handlePipDragStart = (e) => {
+    if (e.pointerType === "mouse" && e.button !== 0) return;
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const baseX = pipOffset.x;
+    const baseY = pipOffset.y;
+    pipDragRef.current = { pointerId: e.pointerId };
+
+    try {
+      e.currentTarget.setPointerCapture?.(e.pointerId);
+    } catch {
+      // ignore
+    }
+
+    const onMove = (ev) => {
+      if (!pipDragRef.current || ev.pointerId !== pipDragRef.current.pointerId) return;
+      const dx = ev.clientX - startX;
+      const dy = ev.clientY - startY;
+      const maxLeftShift = -(typeof window !== "undefined" ? Math.max(120, window.innerWidth - 250) : 600);
+      const maxUpShift = -(typeof window !== "undefined" ? Math.max(100, window.innerHeight - 170) : 500);
+      setPipOffset({
+        x: Math.min(8, Math.max(maxLeftShift, baseX + dx)),
+        y: Math.min(8, Math.max(maxUpShift, baseY + dy)),
+      });
+    };
+
+    const onEnd = (ev) => {
+      if (!pipDragRef.current || ev.pointerId !== pipDragRef.current.pointerId) return;
+      pipDragRef.current = null;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onEnd);
+      window.removeEventListener("pointercancel", onEnd);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onEnd);
+    window.addEventListener("pointercancel", onEnd);
   };
 
   // ─── Monaco Editor Mount & Yjs Binding ─────────────────────────────────────
@@ -2034,92 +2475,165 @@ const VideoCallOverlay = ({
     hasRemoteScreen || peerMediaState.isScreenSharing ? "remote-screen" : isScreenSharing ? "local-screen" : null;
 
   // Render helper for Remote Face Tile
-  const renderRemoteFaceTile = (extraClass = "", compact = false) => (
-    <div
-      onDoubleClick={() => handleToggleTileFullscreen("remote")}
-      className={`relative rounded-2xl bg-slate-900 border overflow-hidden flex items-center justify-center shadow-2xl transition-all group ${
-        rtcConnected ? "border-slate-700/80" : "border-slate-800"
-      } ${extraClass}`}
-    >
-      <video
-        ref={attachRemoteVideo}
-        autoPlay
-        muted
-        playsInline
-        className={`w-full h-full object-cover ${showRemoteAvatarOverlay ? "opacity-0" : "opacity-100"}`}
-      />
+  const renderRemoteFaceTile = (extraClass = "", compact = false, mini = false) => {
+    const isPeerWaiting = peerCallState === "waiting";
+    const isPeerLeft = peerCallState === "left";
+    const remoteInactive = isPeerWaiting || isPeerLeft;
+    const labelName = isPeerLeft && leftPeerName ? leftPeerName : peerDisplayName;
 
-      {showRemoteAvatarOverlay && (
-        <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center bg-slate-900/95 p-3 text-center">
-          <div
-            className={`relative overflow-hidden ${
-              compact ? "w-12 h-12 text-lg" : "w-20 h-20 text-2xl"
-            } rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center text-white font-extrabold shadow-xl ring-2 ring-white/15 mb-2`}
-          >
-            <span>{peerDisplayName[0]?.toUpperCase() || "P"}</span>
-            {peerAvatarImage && (
-              <img
-                src={peerAvatarImage}
-                alt={peerDisplayName}
-                onError={(e) => {
-                  e.currentTarget.style.display = "none";
-                }}
-                className="absolute inset-0 w-full h-full object-cover"
-              />
+    return (
+      <div
+        onDoubleClick={() => handleToggleTileFullscreen("remote")}
+        className={`relative ${mini ? "rounded-xl" : "rounded-2xl"} overflow-hidden flex items-center justify-center shadow-2xl transition-all group ${
+          isPeerLeft
+            ? "bg-rose-950/25 border border-rose-500/40"
+            : isPeerWaiting
+            ? "bg-slate-900/75 border border-dashed border-slate-700"
+            : rtcConnected
+            ? "bg-slate-900 border border-slate-700/80"
+            : "bg-slate-900 border border-slate-800"
+        } ${extraClass}`}
+      >
+        <video
+          ref={attachRemoteVideo}
+          autoPlay
+          muted
+          playsInline
+          className={`w-full h-full object-cover ${
+            remoteInactive || showRemoteAvatarOverlay ? "opacity-0" : "opacity-100"
+          }`}
+        />
+
+        {(remoteInactive || showRemoteAvatarOverlay) && (
+          <div className={`absolute inset-0 pointer-events-none flex flex-col items-center justify-center bg-slate-900/95 ${mini ? "p-1" : "p-3"} text-center`}>
+            {isPeerLeft ? (
+              <>
+                <div
+                  className={`relative ${
+                    mini ? "w-6 h-6 mb-0.5" : compact ? "w-11 h-11 mb-2" : "w-16 h-16 mb-2"
+                  } rounded-full bg-rose-500/15 border border-rose-500/40 flex items-center justify-center text-rose-400 shadow-lg`}
+                >
+                  <PhoneOff size={mini ? 12 : compact ? 18 : 26} />
+                </div>
+                <span className={`${mini ? "text-[9px]" : compact ? "text-xs" : "text-sm"} font-bold text-white truncate max-w-full`}>
+                  {labelName}
+                </span>
+                <span className={`mt-0.5 px-1.5 py-0.5 rounded-full ${mini ? "text-[8px]" : "text-[10px]"} font-bold bg-rose-500/20 text-rose-300 border border-rose-500/30`}>
+                  {mini ? "Left" : "Left the call"}
+                </span>
+                {!compact && (
+                  <span className="text-xs text-slate-400 mt-1.5">
+                    Disconnected — waiting if they rejoin
+                  </span>
+                )}
+              </>
+            ) : isPeerWaiting ? (
+              <>
+                <div
+                  className={`relative ${
+                    mini ? "w-6 h-6 mb-0.5" : compact ? "w-11 h-11 mb-2" : "w-16 h-16 mb-2"
+                  } rounded-full bg-slate-800/90 border border-dashed border-slate-600 flex items-center justify-center text-slate-400`}
+                >
+                  <Clock size={mini ? 12 : compact ? 18 : 24} className="animate-pulse text-indigo-400" />
+                </div>
+                <span className={`${mini ? "text-[9px]" : compact ? "text-xs" : "text-sm"} font-semibold text-slate-300 truncate max-w-full`}>
+                  {labelName}
+                </span>
+                <span className={`mt-0.5 px-1.5 py-0.5 rounded-full ${mini ? "text-[8px]" : "text-[10px]"} font-semibold bg-slate-800 text-slate-400 border border-slate-700`}>
+                  {mini ? "Waiting" : "Not joined yet"}
+                </span>
+                {!compact && (
+                  <span className="text-xs text-slate-500 mt-1.5">
+                    Waiting for partner to join the room...
+                  </span>
+                )}
+              </>
+            ) : (
+              <>
+                <div
+                  className={`relative overflow-hidden ${
+                    mini ? "w-7 h-7 text-xs mb-0.5" : compact ? "w-12 h-12 text-lg mb-2" : "w-20 h-20 text-2xl mb-2"
+                  } rounded-full bg-gradient-to-tr from-indigo-600 to-purple-600 flex items-center justify-center text-white font-extrabold shadow-xl ring-2 ring-white/15`}
+                >
+                  <span>{labelName[0]?.toUpperCase() || "P"}</span>
+                  {peerAvatarImage && (
+                    <img
+                      src={peerAvatarImage}
+                      alt={labelName}
+                      onError={(e) => {
+                        e.currentTarget.style.display = "none";
+                      }}
+                      className="absolute inset-0 w-full h-full object-cover"
+                    />
+                  )}
+                </div>
+                <span className={`${mini ? "text-[9px]" : compact ? "text-xs" : "text-sm"} font-bold text-white truncate max-w-full`}>
+                  {labelName}
+                </span>
+                {!compact && (
+                  <span className="text-xs text-slate-400 mt-1">
+                    {rtcConnected
+                      ? peerMediaState.isCameraOff
+                        ? "Camera is turned off"
+                        : "Connected"
+                      : "Connecting audio & video..."}
+                  </span>
+                )}
+              </>
             )}
           </div>
-          <span className={`${compact ? "text-xs" : "text-sm"} font-bold text-white truncate max-w-full`}>
-            {peerDisplayName}
-          </span>
-          {!compact && (
-            <span className="text-xs text-slate-400 mt-1">
-              {rtcConnected
-                ? peerMediaState.isCameraOff
-                  ? "Camera is turned off"
-                  : "Connected"
-                : "Waiting for partner video..."}
-            </span>
-          )}
-        </div>
-      )}
+        )}
 
-      {/* Expand / Fullscreen button */}
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          handleToggleTileFullscreen("remote");
-        }}
-        title={spotlightTile === "remote" ? "Exit Full Screen" : "Full Screen"}
-        className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-slate-950/75 hover:bg-indigo-600 text-white border border-white/10 opacity-85 group-hover:opacity-100 transition cursor-pointer z-10"
-      >
-        {spotlightTile === "remote" ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-      </button>
+        {/* Expand / Fullscreen button */}
+        {!mini && (
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              handleToggleTileFullscreen("remote");
+            }}
+            title={spotlightTile === "remote" ? "Exit Full Screen" : "Full Screen"}
+            className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-slate-950/75 hover:bg-indigo-600 text-white border border-white/10 opacity-85 group-hover:opacity-100 transition cursor-pointer z-10"
+          >
+            {spotlightTile === "remote" ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+          </button>
+        )}
 
-      <div className="absolute bottom-2.5 left-2.5 pl-1.5 pr-2.5 py-1 rounded-full bg-slate-950/80 backdrop-blur-sm border border-white/10 text-xs font-semibold text-white flex items-center gap-1.5 max-w-[85%]">
-        <div className="relative w-5 h-5 rounded-full overflow-hidden bg-indigo-600 flex items-center justify-center text-[10px] font-bold text-white shrink-0">
-          <span>{peerDisplayName[0]?.toUpperCase() || "P"}</span>
-          {peerAvatarImage && (
-            <img
-              src={peerAvatarImage}
-              alt={peerDisplayName}
-              onError={(e) => {
-                e.currentTarget.style.display = "none";
-              }}
-              className="absolute inset-0 w-full h-full object-cover"
-            />
-          )}
-        </div>
-        <span className="truncate">{peerDisplayName}</span>
-        {peerMediaState.isMuted && <MicOff size={12} className="text-rose-400 shrink-0" />}
+        {peerCallState === "joined" && (
+          <div
+            className={`absolute ${
+              mini
+                ? "bottom-1 left-1 px-1.5 py-0.5 text-[9px] gap-1 max-w-[92%]"
+                : "bottom-2.5 left-2.5 pl-1.5 pr-2.5 py-1 text-xs gap-1.5 max-w-[85%]"
+            } rounded-full bg-slate-950/80 backdrop-blur-sm border border-white/10 font-semibold text-white flex items-center`}
+          >
+            {!mini && (
+              <div className="relative w-5 h-5 rounded-full overflow-hidden bg-indigo-600 flex items-center justify-center text-[10px] font-bold text-white shrink-0">
+                <span>{labelName[0]?.toUpperCase() || "P"}</span>
+                {peerAvatarImage && (
+                  <img
+                    src={peerAvatarImage}
+                    alt={labelName}
+                    onError={(e) => {
+                      e.currentTarget.style.display = "none";
+                    }}
+                    className="absolute inset-0 w-full h-full object-cover"
+                  />
+                )}
+              </div>
+            )}
+            <span className="truncate">{labelName}</span>
+            {peerMediaState.isMuted && <MicOff size={mini ? 10 : 12} className="text-rose-400 shrink-0" />}
+          </div>
+        )}
       </div>
-    </div>
-  );
+    );
+  };
 
   // Render helper for Local Face Tile
-  const renderLocalFaceTile = (extraClass = "", compact = false) => (
+  const renderLocalFaceTile = (extraClass = "", compact = false, mini = false) => (
     <div
       onDoubleClick={() => handleToggleTileFullscreen("local")}
-      className={`relative rounded-2xl bg-slate-900 border border-slate-700/80 overflow-hidden flex items-center justify-center shadow-2xl transition-all group ${extraClass}`}
+      className={`relative ${mini ? "rounded-xl" : "rounded-2xl"} bg-slate-900 border border-slate-700/80 overflow-hidden flex items-center justify-center shadow-2xl transition-all group ${extraClass}`}
     >
       <video
         ref={attachLocalVideo}
@@ -2130,10 +2644,10 @@ const VideoCallOverlay = ({
       />
 
       {showLocalAvatarOverlay && (
-        <div className="flex flex-col items-center justify-center text-slate-300 space-y-1.5 p-3">
+        <div className={`flex flex-col items-center justify-center text-slate-300 ${mini ? "space-y-0.5 p-1" : "space-y-1.5 p-3"}`}>
           <div
             className={`relative overflow-hidden ${
-              compact ? "w-12 h-12 text-lg" : "w-20 h-20 text-2xl"
+              mini ? "w-7 h-7 text-xs" : compact ? "w-12 h-12 text-lg" : "w-20 h-20 text-2xl"
             } rounded-full bg-gradient-to-tr from-emerald-600 to-teal-600 flex items-center justify-center text-white font-extrabold shadow-xl ring-2 ring-white/15`}
           >
             <span>{currentUserName[0]?.toUpperCase() || "Y"}</span>
@@ -2148,8 +2662,8 @@ const VideoCallOverlay = ({
               />
             )}
           </div>
-          <span className={`${compact ? "text-xs" : "text-sm"} font-bold text-white text-center truncate max-w-full`}>
-            {currentUserName} (You)
+          <span className={`${mini ? "text-[9px]" : compact ? "text-xs" : "text-sm"} font-bold text-white text-center truncate max-w-full`}>
+            {mini ? "You" : `${currentUserName} (You)`}
           </span>
           {!compact && (
             <span className="text-xs text-slate-400 flex items-center gap-1">
@@ -2159,33 +2673,43 @@ const VideoCallOverlay = ({
         </div>
       )}
 
-      <button
-        onClick={(e) => {
-          e.stopPropagation();
-          handleToggleTileFullscreen("local");
-        }}
-        title={spotlightTile === "local" ? "Exit Full Screen" : "Full Screen"}
-        className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-slate-950/75 hover:bg-indigo-600 text-white border border-white/10 opacity-85 group-hover:opacity-100 transition cursor-pointer z-10"
-      >
-        {spotlightTile === "local" ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-      </button>
+      {!mini && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            handleToggleTileFullscreen("local");
+          }}
+          title={spotlightTile === "local" ? "Exit Full Screen" : "Full Screen"}
+          className="absolute top-2.5 right-2.5 p-1.5 rounded-lg bg-slate-950/75 hover:bg-indigo-600 text-white border border-white/10 opacity-85 group-hover:opacity-100 transition cursor-pointer z-10"
+        >
+          {spotlightTile === "local" ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+        </button>
+      )}
 
-      <div className="absolute bottom-2.5 left-2.5 pl-1.5 pr-2.5 py-1 rounded-full bg-slate-950/80 backdrop-blur-sm border border-white/10 text-xs font-semibold text-white flex items-center gap-1.5 max-w-[85%]">
-        <div className="relative w-5 h-5 rounded-full overflow-hidden bg-emerald-600 flex items-center justify-center text-[10px] font-bold text-white shrink-0">
-          <span>{currentUserName[0]?.toUpperCase() || "Y"}</span>
-          {currentUserImage && (
-            <img
-              src={currentUserImage}
-              alt={currentUserName}
-              onError={(e) => {
-                e.currentTarget.style.display = "none";
-              }}
-              className="absolute inset-0 w-full h-full object-cover"
-            />
-          )}
-        </div>
-        <span className="truncate">{currentUserName} (You)</span>
-        {isMuted && <MicOff size={12} className="text-rose-400 shrink-0" />}
+      <div
+        className={`absolute ${
+          mini
+            ? "bottom-1 left-1 px-1.5 py-0.5 text-[9px] gap-1 max-w-[92%]"
+            : "bottom-2.5 left-2.5 pl-1.5 pr-2.5 py-1 text-xs gap-1.5 max-w-[85%]"
+        } rounded-full bg-slate-950/80 backdrop-blur-sm border border-white/10 font-semibold text-white flex items-center`}
+      >
+        {!mini && (
+          <div className="relative w-5 h-5 rounded-full overflow-hidden bg-emerald-600 flex items-center justify-center text-[10px] font-bold text-white shrink-0">
+            <span>{currentUserName[0]?.toUpperCase() || "Y"}</span>
+            {currentUserImage && (
+              <img
+                src={currentUserImage}
+                alt={currentUserName}
+                onError={(e) => {
+                  e.currentTarget.style.display = "none";
+                }}
+                className="absolute inset-0 w-full h-full object-cover"
+              />
+            )}
+          </div>
+        )}
+        <span className="truncate">{mini ? "You" : `${currentUserName} (You)`}</span>
+        {isMuted && <MicOff size={mini ? 10 : 12} className="text-rose-400 shrink-0" />}
       </div>
     </div>
   );
@@ -2236,7 +2760,8 @@ const VideoCallOverlay = ({
   return (
     <div
       ref={rootOverlayRef}
-      className="fixed inset-0 z-[99999] bg-[#090d16] flex flex-col overflow-hidden text-slate-100 font-sans select-none"
+      style={{ touchAction: isWhiteboardFullscreen ? "none" : "auto" }}
+      className="fixed inset-0 h-[100dvh] w-screen z-[99999] bg-[#090d16] flex flex-col overflow-hidden text-slate-100 font-sans select-none"
     >
       {/* Dedicated persistent audio element so remote voice plays cleanly in all views */}
       <audio ref={attachRemoteAudio} autoPlay playsInline className="hidden" />
@@ -2252,8 +2777,9 @@ const VideoCallOverlay = ({
         }
       `}</style>
 
-      {/* ── TOP ZOOM-STYLE HEADER BAR ── */}
-      <header className="h-14 px-4 bg-slate-900/95 border-b border-slate-800/90 flex items-center justify-between gap-3 shrink-0 backdrop-blur-md">
+      {/* ── TOP ZOOM-STYLE HEADER BAR (hidden in edge-to-edge iPad Whiteboard Fullscreen) ── */}
+      {!isWhiteboardFullscreen && (
+        <header className="h-14 px-4 bg-slate-900/95 border-b border-slate-800/90 flex items-center justify-between gap-3 shrink-0 backdrop-blur-md">
         <div className="flex items-center gap-3 min-w-0">
           <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-indigo-500 to-blue-600 flex items-center justify-center text-white shadow-md shadow-indigo-500/20 shrink-0">
             <Video size={16} />
@@ -2263,25 +2789,54 @@ const VideoCallOverlay = ({
               <span>{schedule?.title || "Live Collaborative Meeting"}</span>
               <span
                 className={`px-2 py-0.5 rounded-full text-[10px] font-bold flex items-center gap-1 border ${
-                  rtcConnected
+                  peerCallState === "left"
+                    ? "bg-rose-500/15 text-rose-300 border-rose-500/30"
+                    : peerCallState === "waiting"
+                    ? "bg-slate-800 text-slate-300 border-slate-700"
+                    : rtcConnected
                     ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
                     : "bg-amber-500/15 text-amber-300 border-amber-500/30"
                 }`}
               >
                 <span
                   className={`w-1.5 h-1.5 rounded-full ${
-                    rtcConnected ? "bg-emerald-400 animate-pulse" : "bg-amber-400 animate-pulse"
+                    peerCallState === "left"
+                      ? "bg-rose-400"
+                      : peerCallState === "waiting"
+                      ? "bg-slate-400 animate-pulse"
+                      : rtcConnected
+                      ? "bg-emerald-400 animate-pulse"
+                      : "bg-amber-400 animate-pulse"
                   }`}
                 />
-                {rtcConnected ? "Connected" : "Connecting..."}
+                {peerCallState === "left"
+                  ? "Partner Left"
+                  : peerCallState === "waiting"
+                  ? "Waiting"
+                  : rtcConnected
+                  ? "Connected"
+                  : "Connecting..."}
               </span>
             </h2>
           </div>
 
           <div className="hidden lg:flex items-center gap-1.5 pl-3 border-l border-slate-800">
-            <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-slate-800 text-slate-300 flex items-center gap-1">
-              <Users size={11} className="text-indigo-400" />
-              {activePeers.length > 0 ? "2 Participants" : "Waiting for partner"}
+            <span
+              className={`px-2 py-0.5 rounded-full text-[10px] font-semibold flex items-center gap-1 ${
+                peerCallState === "left"
+                  ? "bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                  : "bg-slate-800 text-slate-300"
+              }`}
+            >
+              <Users
+                size={11}
+                className={peerCallState === "left" ? "text-rose-400" : "text-indigo-400"}
+              />
+              {peerCallState === "joined"
+                ? "2 Participants"
+                : peerCallState === "left"
+                ? `${leftPeerName || peerDisplayName} left`
+                : "1 Participant (Waiting)"}
             </span>
           </div>
         </div>
@@ -2349,10 +2904,10 @@ const VideoCallOverlay = ({
           <button
             onClick={handleToggleBrowserFullscreen}
             className="px-2.5 py-1.5 rounded-lg bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 text-xs font-semibold flex items-center gap-1.5 transition cursor-pointer"
-            title={isBrowserFullscreen ? "Exit Window Fullscreen" : "Enter Fullscreen"}
+            title={isFullscreenActive ? "Exit Window Fullscreen" : "Enter Fullscreen"}
           >
-            {isBrowserFullscreen ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
-            <span className="hidden sm:inline">{isBrowserFullscreen ? "Exit Full" : "Fullscreen"}</span>
+            {isFullscreenActive ? <Minimize2 size={13} /> : <Maximize2 size={13} />}
+            <span className="hidden sm:inline">{isFullscreenActive ? "Exit Full" : "Fullscreen"}</span>
           </button>
 
           {remainingSecs !== null && (
@@ -2363,6 +2918,7 @@ const VideoCallOverlay = ({
           )}
         </div>
       </header>
+      )}
 
       {/* ── TOAST / WARNING BANNERS ── */}
       {errorMsg && (
@@ -2392,9 +2948,17 @@ const VideoCallOverlay = ({
         </div>
       )}
 
-      {callEndedToast && (
-        <div className="bg-rose-600 text-white text-xs text-center py-1.5 font-bold">
-          Partner ended the call. Closing meeting room...
+      {(callEndedToast || peerCallState === "left") && (
+        <div className="bg-rose-600/95 text-white text-xs text-center py-1.5 px-3 font-semibold flex items-center justify-center gap-3">
+          <span>
+            {leftPeerName || peerDisplayName} left the call. You can stay in the workspace or leave.
+          </span>
+          <button
+            onClick={handleEndCall}
+            className="px-2.5 py-0.5 rounded-full bg-white/20 hover:bg-white/30 text-white text-[11px] font-bold transition cursor-pointer"
+          >
+            End Call
+          </button>
         </div>
       )}
 
@@ -2479,11 +3043,15 @@ const VideoCallOverlay = ({
           </div>
         )}
 
-        {/* ── MODE 2: WHITEBOARD SPLIT VIEW ── */}
+        {/* ── MODE 2: WHITEBOARD SPLIT / FULLSCREEN VIEW ── */}
         {viewMode === "whiteboard" && (
           <div
-            className={`flex flex-col min-h-0 border-r border-slate-800 transition-all ${
-              isWorkspaceExpanded ? "w-full" : "w-full lg:w-[66%]"
+            className={`flex flex-col min-h-0 transition-all ${
+              isWhiteboardFullscreen
+                ? "w-full h-full"
+                : useFloatingPipLayout
+                ? "w-full border-r border-slate-800"
+                : "w-full lg:w-[66%] border-r border-slate-800"
             }`}
           >
             <WhiteboardCanvas
@@ -2499,6 +3067,8 @@ const VideoCallOverlay = ({
                 )
               }
               onClearStrokes={() => setWhiteboardStrokes([])}
+              isFullscreen={isWhiteboardFullscreen}
+              onToggleFullscreen={handleToggleWhiteboardFullscreen}
             />
           </div>
         )}
@@ -2546,7 +3116,7 @@ const VideoCallOverlay = ({
         )}
 
         {/* ── SIDE VIDEO STRIP WHEN CODE / WHITEBOARD IS OPEN (DESKTOP) ── */}
-        {viewMode !== "video" && !isWorkspaceExpanded && isDesktop && (
+        {viewMode !== "video" && !useFloatingPipLayout && (
           <div className="flex w-[34%] flex-col min-h-0 p-3 bg-slate-950 gap-3">
             {isAnyScreenActive ? (
               <>
@@ -2565,11 +3135,109 @@ const VideoCallOverlay = ({
           </div>
         )}
 
-        {/* ── FLOATING PiP FACES ON MOBILE OR EXPANDED WORKSPACE ── */}
-        {viewMode !== "video" && (isWorkspaceExpanded || !isDesktop) && (
-          <div className="flex absolute bottom-4 right-4 z-20 items-center gap-2 bg-slate-950/80 p-1.5 rounded-2xl border border-white/10 backdrop-blur-md shadow-2xl">
-            {renderRemoteFaceTile("w-36 h-24 sm:w-44 sm:h-28", true)}
-            {renderLocalFaceTile("w-36 h-24 sm:w-44 sm:h-28", true)}
+        {/* ── COMPACT FLOATING & DRAGGABLE MINI VIDEO PiP ON iPAD / FULLSCREEN / MOBILE ── */}
+        {viewMode !== "video" && useFloatingPipLayout && (
+          <div
+            style={{
+              transform: `translate3d(${pipOffset.x}px, ${pipOffset.y}px, 0)`,
+              bottom: isWhiteboardFullscreen
+                ? "max(0.75rem, env(safe-area-inset-bottom))"
+                : "1rem",
+              right: isWhiteboardFullscreen
+                ? "max(0.75rem, env(safe-area-inset-right))"
+                : "1rem",
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="flex flex-col absolute z-20 bg-slate-950/85 p-1.5 rounded-2xl border border-white/15 backdrop-blur-md shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-2 px-1 pb-1 text-[10px] font-bold text-slate-300">
+              <button
+                type="button"
+                onPointerDown={handlePipDragStart}
+                title="Drag video window"
+                style={{ touchAction: "none" }}
+                className="flex items-center gap-1 cursor-grab active:cursor-grabbing text-slate-400 hover:text-white px-1 py-0.5 rounded"
+              >
+                <Move size={11} />
+                <span>{isPipCollapsed ? "Video Hidden" : "Video PiP"}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setIsPipCollapsed((prev) => !prev)}
+                title={isPipCollapsed ? "Show Mini Videos" : "Minimize Mini Videos"}
+                className="p-0.5 rounded hover:bg-slate-800 text-slate-300 hover:text-white cursor-pointer"
+              >
+                {isPipCollapsed ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+              </button>
+            </div>
+            {!isPipCollapsed && (
+              <div className="flex items-center gap-1.5">
+                {renderRemoteFaceTile(
+                  isWhiteboardFullscreen
+                    ? "w-24 h-16 sm:w-28 sm:h-[72px]"
+                    : "w-32 h-20 sm:w-40 sm:h-24",
+                  true,
+                  isWhiteboardFullscreen
+                )}
+                {renderLocalFaceTile(
+                  isWhiteboardFullscreen
+                    ? "w-24 h-16 sm:w-28 sm:h-[72px]"
+                    : "w-32 h-20 sm:w-40 sm:h-24",
+                  true,
+                  isWhiteboardFullscreen
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── SLIM FLOATING MINI CALL DOCK IN FULLSCREEN WHITEBOARD MODE ── */}
+        {isWhiteboardFullscreen && (
+          <div
+            style={{
+              bottom: "max(0.75rem, env(safe-area-inset-bottom))",
+              left: "max(0.75rem, env(safe-area-inset-left))",
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            className="absolute z-20 flex items-center gap-1.5 bg-slate-950/85 border border-white/15 backdrop-blur-md px-2 py-1.5 rounded-2xl shadow-2xl"
+          >
+            <button
+              onClick={handleToggleMute}
+              title={isMuted ? "Unmute" : "Mute"}
+              className={`p-2 rounded-xl text-xs transition cursor-pointer ${
+                isMuted
+                  ? "bg-rose-600/25 border border-rose-500 text-rose-300"
+                  : "bg-slate-800 hover:bg-slate-700 text-white"
+              }`}
+            >
+              {isMuted ? <MicOff size={15} /> : <Mic size={15} />}
+            </button>
+            <button
+              onClick={handleToggleCamera}
+              title={isCameraOff ? "Start Video" : "Stop Video"}
+              className={`p-2 rounded-xl text-xs transition cursor-pointer ${
+                isCameraOff
+                  ? "bg-rose-600/25 border border-rose-500 text-rose-300"
+                  : "bg-slate-800 hover:bg-slate-700 text-white"
+              }`}
+            >
+              {isCameraOff ? <VideoOff size={15} /> : <Video size={15} />}
+            </button>
+            <button
+              onClick={handleToggleWhiteboardFullscreen}
+              title="Exit Full Screen"
+              className="px-2.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-bold flex items-center gap-1 transition cursor-pointer"
+            >
+              <Minimize2 size={14} />
+              <span className="hidden sm:inline">Exit Full</span>
+            </button>
+            <button
+              onClick={handleEndCall}
+              title="Leave Call"
+              className="p-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white transition cursor-pointer"
+            >
+              <PhoneOff size={15} />
+            </button>
           </div>
         )}
 
@@ -2671,7 +3339,8 @@ const VideoCallOverlay = ({
         </AnimatePresence>
       </div>
 
-      {/* ── BOTTOM ZOOM-STYLE CONTROLS BAR ── */}
+      {/* ── BOTTOM ZOOM-STYLE CONTROLS BAR (hidden in edge-to-edge iPad Whiteboard Fullscreen) ── */}
+      {!isWhiteboardFullscreen && (
       <footer className="h-[72px] px-4 sm:px-6 bg-slate-900/95 border-t border-slate-800 flex items-center justify-between shrink-0 z-20 backdrop-blur-md">
         {/* Left: Terminal Toggle (Code) or Video View Return */}
         <div className="flex items-center gap-2 min-w-[90px]">
@@ -2798,6 +3467,7 @@ const VideoCallOverlay = ({
           </button>
         </div>
       </footer>
+      )}
     </div>
   );
 };
