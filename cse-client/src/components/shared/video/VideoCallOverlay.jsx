@@ -41,6 +41,7 @@ const resolveIceServers = () => {
   const defaultServers = [
     { urls: "stun:stun.cloudflare.com:3478" },
     { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
   ];
 
   if (import.meta.env.VITE_ICE_SERVERS) {
@@ -58,19 +59,6 @@ const resolveIceServers = () => {
       username: import.meta.env.VITE_TURN_USERNAME || "",
       credential: import.meta.env.VITE_TURN_PASSWORD || "",
     });
-  } else {
-    defaultServers.push(
-      {
-        urls: "turn:openrelay.metered.ca:80",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      },
-      {
-        urls: "turn:openrelay.metered.ca:443?transport=tcp",
-        username: "openrelayproject",
-        credential: "openrelayproject",
-      }
-    );
   }
 
   return defaultServers;
@@ -178,18 +166,16 @@ const preferLowLatencyVideoCodecs = (pc) => {
   try {
     const caps = RTCRtpReceiver.getCapabilities("video");
     if (!caps?.codecs?.length) return;
-    const h264 = [];
-    const vp8 = [];
-    const other = [];
-    for (const c of caps.codecs) {
-      const m = (c.mimeType || "").toLowerCase();
-      if (m === "video/h264") h264.push(c);
-      else if (m === "video/vp8") vp8.push(c);
-      else other.push(c);
-    }
-    const fastCodecs = [...h264, ...vp8];
+    // Keep browser-native VP8/H264 priority & matching RTX retransmission codecs together
+    // so cross-platform negotiation (iPad Safari <-> Desktop Chrome) never breaks profile matching.
+    const isFastOrRtx = (mime = "") => {
+      const m = mime.toLowerCase();
+      return m === "video/vp8" || m === "video/h264" || m === "video/rtx";
+    };
+    const fastCodecs = caps.codecs.filter((c) => isFastOrRtx(c.mimeType));
     if (fastCodecs.length === 0) return;
-    const ordered = [...fastCodecs, ...other];
+    const otherCodecs = caps.codecs.filter((c) => !isFastOrRtx(c.mimeType));
+    const ordered = [...fastCodecs, ...otherCodecs];
 
     pc.getTransceivers().forEach((transceiver) => {
       const isVideoTransceiver =
@@ -205,37 +191,6 @@ const preferLowLatencyVideoCodecs = (pc) => {
     });
   } catch {
     // Ignore capability query failures
-  }
-};
-
-const optimizeSdpLowLatency = (sdp) => {
-  if (!sdp || typeof sdp !== "string") return sdp;
-  try {
-    const lines = sdp.split("\r\n");
-    const opusMatch = lines.find((l) => l.startsWith("a=rtpmap:") && /opus\/48000/i.test(l));
-    if (!opusMatch) return sdp;
-    const pt = opusMatch.slice("a=rtpmap:".length).split(" ")[0];
-    if (!pt) return sdp;
-
-    const fmtpPrefix = `a=fmtp:${pt} `;
-    let foundFmtp = false;
-    const updated = lines.map((line) => {
-      if (!line.startsWith(fmtpPrefix)) return line;
-      foundFmtp = true;
-      let out = line;
-      if (!/minptime=/i.test(out)) out += ";minptime=10";
-      if (!/useinbandfec=/i.test(out)) out += ";useinbandfec=1";
-      return out;
-    });
-    if (!foundFmtp) {
-      const rtpmapIdx = updated.findIndex((l) => l === opusMatch);
-      if (rtpmapIdx !== -1) {
-        updated.splice(rtpmapIdx + 1, 0, `a=fmtp:${pt} minptime=10;useinbandfec=1`);
-      }
-    }
-    return updated.join("\r\n");
-  } catch {
-    return sdp;
   }
 };
 
@@ -834,6 +789,8 @@ const VideoCallOverlay = ({
       }
       setCallEndedToast(false);
       setLeftPeerName("");
+      setReconnecting(false);
+      setErrorMsg(null);
       const wasJoined = peerCallStateRef.current === "joined";
       setPeerCallStatus("joined");
 
@@ -969,6 +926,8 @@ const VideoCallOverlay = ({
     let readyRetryInterval = null;
     let disconnectIceRestartTimeout = null;
     let lastIceRestartAt = 0;
+    let lastOfferSentAt = 0;
+    let hasConnectedOnce = false;
 
     if (socket && !socket.connected) {
       socket.connect();
@@ -999,14 +958,8 @@ const VideoCallOverlay = ({
           pc.restartIce();
         }
         const offer = await pc.createOffer(iceRestart ? { iceRestart: true } : undefined);
-        try {
-          await pc.setLocalDescription({
-            type: offer.type,
-            sdp: optimizeSdpLowLatency(offer.sdp),
-          });
-        } catch {
-          await pc.setLocalDescription(offer);
-        }
+        await pc.setLocalDescription(offer);
+        lastOfferSentAt = Date.now();
         socket.emit("rtc:offer", {
           to: target,
           roomId,
@@ -1028,7 +981,10 @@ const VideoCallOverlay = ({
 
       if (getEffectiveIsCaller()) {
         localIceCandidatesRef.current = [];
-        if (pc.signalingState === "stable") {
+        if (
+          pc.signalingState === "stable" ||
+          (forceNow && pc.signalingState === "have-local-offer")
+        ) {
           void sendOffer(pc, { iceRestart: true });
         }
       } else {
@@ -1084,14 +1040,7 @@ const VideoCallOverlay = ({
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         await flushPendingIce(pc);
         const answer = await pc.createAnswer();
-        try {
-          await pc.setLocalDescription({
-            type: answer.type,
-            sdp: optimizeSdpLowLatency(answer.sdp),
-          });
-        } catch {
-          await pc.setLocalDescription(answer);
-        }
+        await pc.setLocalDescription(answer);
         socket?.emit("rtc:answer", {
           to: resolvedPeerEmailRef.current || from || getTargetPeer(),
           roomId,
@@ -1159,21 +1108,24 @@ const VideoCallOverlay = ({
           localIceCandidatesRef.current = [];
           void sendOffer(pc, { iceRestart: true });
         } else if (pc.localDescription && !pc.remoteDescription) {
-          socket?.emit("rtc:offer", {
-            to: target,
-            roomId,
-            from: currentUserEmail,
-            offer: pc.localDescription,
-            scheduleId: schedule?._id,
-          });
-          localIceCandidatesRef.current.forEach((cand) => {
-            socket?.emit("rtc:ice-candidate", {
+          if (Date.now() - lastOfferSentAt >= 1200) {
+            lastOfferSentAt = Date.now();
+            socket?.emit("rtc:offer", {
               to: target,
               roomId,
               from: currentUserEmail,
-              candidate: cand,
+              offer: pc.localDescription,
+              scheduleId: schedule?._id,
             });
-          });
+            localIceCandidatesRef.current.forEach((cand) => {
+              socket?.emit("rtc:ice-candidate", {
+                to: target,
+                roomId,
+                from: currentUserEmail,
+                candidate: cand,
+              });
+            });
+          }
         } else if (!pc.remoteDescription && pc.signalingState === "stable") {
           void sendOffer(pc);
         }
@@ -1323,33 +1275,124 @@ const VideoCallOverlay = ({
         }
       };
 
+      const markConnectionHealthy = () => {
+        hasConnectedOnce = true;
+        setRtcConnected(true);
+        setReconnecting(false);
+        setErrorMsg(null);
+        if (peerCallStateRef.current !== "joined") {
+          setPeerCallStatus("joined");
+          setCallEndedToast(false);
+        }
+        if (disconnectIceRestartTimeout) {
+          clearTimeout(disconnectIceRestartTimeout);
+          disconnectIceRestartTimeout = null;
+        }
+        if (readyRetryInterval) {
+          clearInterval(readyRetryInterval);
+          readyRetryInterval = null;
+        }
+        if (reconnectTimerRef.current) {
+          clearInterval(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
+      };
+
+      const handleConnectionDrop = (state) => {
+        setRtcConnected(false);
+        if (peerCallStateRef.current === "left") {
+          return;
+        }
+
+        // Before initial connection succeeds or partner joins, avoid flashing "Connection drop detected"
+        if (!hasConnectedOnce || peerCallStateRef.current !== "joined") {
+          if (state === "failed" && peerCallStateRef.current === "joined") {
+            if (!disconnectIceRestartTimeout) {
+              disconnectIceRestartTimeout = setTimeout(() => {
+                disconnectIceRestartTimeout = null;
+                if (
+                  pcRef.current &&
+                  (pcRef.current.connectionState === "failed" ||
+                    pcRef.current.iceConnectionState === "failed")
+                ) {
+                  requestIceRecovery(false);
+                }
+              }, 1200);
+            }
+          }
+          return;
+        }
+
+        const scheduleRecovery = (delayMs) => {
+          if (disconnectIceRestartTimeout) return;
+          disconnectIceRestartTimeout = setTimeout(() => {
+            disconnectIceRestartTimeout = null;
+            const curPc = pcRef.current;
+            if (!curPc || peerCallStateRef.current === "left") return;
+            const curConn = curPc.connectionState;
+            const curIce = curPc.iceConnectionState;
+            if (curConn === "connected" || curIce === "connected" || curIce === "completed") {
+              markConnectionHealthy();
+              return;
+            }
+            if (
+              curConn === "disconnected" ||
+              curConn === "failed" ||
+              curIce === "disconnected" ||
+              curIce === "failed"
+            ) {
+              setReconnecting(true);
+              requestIceRecovery(false);
+            }
+          }, delayMs);
+        };
+
+        if (state === "failed") {
+          setReconnecting(true);
+          scheduleRecovery(500);
+        } else {
+          // Wait 3s on brief packet loss so normal WiFi/cellular jitter heals cleanly without flashing banner
+          scheduleRecovery(3000);
+        }
+
+        if (!reconnectTimerRef.current && state === "failed") {
+          const totalGraceSecs = 20;
+          setReconnectSecsLeft(totalGraceSecs);
+          let secsLeft = totalGraceSecs;
+          reconnectTimerRef.current = setInterval(() => {
+            secsLeft -= 1;
+            setReconnectSecsLeft(secsLeft);
+            if (secsLeft === 10 || secsLeft === 5) {
+              if (
+                pcRef.current &&
+                (pcRef.current.connectionState === "disconnected" ||
+                  pcRef.current.connectionState === "failed")
+              ) {
+                requestIceRecovery(false);
+              }
+            }
+            if (secsLeft <= 0) {
+              clearInterval(reconnectTimerRef.current);
+              reconnectTimerRef.current = null;
+              if (
+                pcRef.current &&
+                (pcRef.current.connectionState === "disconnected" ||
+                  pcRef.current.connectionState === "failed")
+              ) {
+                setErrorMsg("Video connection dropped. Collaboration tools remain active.");
+                setReconnecting(false);
+              }
+            }
+          }, 1000);
+        }
+      };
+
       pc.oniceconnectionstatechange = () => {
         const iceState = pc.iceConnectionState;
         if (iceState === "connected" || iceState === "completed") {
-          setRtcConnected(true);
-          setReconnecting(false);
-          setErrorMsg(null);
-          if (peerCallStateRef.current !== "joined") {
-            setPeerCallStatus("joined");
-            setCallEndedToast(false);
-          }
-          if (disconnectIceRestartTimeout) {
-            clearTimeout(disconnectIceRestartTimeout);
-            disconnectIceRestartTimeout = null;
-          }
-        } else if (iceState === "failed") {
-          requestIceRecovery(false);
-        } else if (iceState === "disconnected") {
-          if (disconnectIceRestartTimeout) clearTimeout(disconnectIceRestartTimeout);
-          disconnectIceRestartTimeout = setTimeout(() => {
-            if (
-              pcRef.current &&
-              (pcRef.current.iceConnectionState === "disconnected" ||
-                pcRef.current.iceConnectionState === "failed")
-            ) {
-              requestIceRecovery(false);
-            }
-          }, 1500);
+          markConnectionHealthy();
+        } else if (iceState === "failed" || iceState === "disconnected") {
+          handleConnectionDrop(iceState);
         }
       };
 
@@ -1426,72 +1469,9 @@ const VideoCallOverlay = ({
       pc.onconnectionstatechange = () => {
         const state = pc.connectionState;
         if (state === "connected") {
-          setRtcConnected(true);
-          setReconnecting(false);
-          setErrorMsg(null);
-          if (disconnectIceRestartTimeout) {
-            clearTimeout(disconnectIceRestartTimeout);
-            disconnectIceRestartTimeout = null;
-          }
-          if (readyRetryInterval) {
-            clearInterval(readyRetryInterval);
-            readyRetryInterval = null;
-          }
-          if (reconnectTimerRef.current) {
-            clearInterval(reconnectTimerRef.current);
-            reconnectTimerRef.current = null;
-          }
+          markConnectionHealthy();
         } else if (state === "disconnected" || state === "failed") {
-          setRtcConnected(false);
-          if (peerCallStateRef.current === "left") {
-            return;
-          }
-          setReconnecting(true);
-          const totalGraceSecs = 20;
-          setReconnectSecsLeft(totalGraceSecs);
-
-          if (state === "failed") {
-            requestIceRecovery(false);
-          } else {
-            if (disconnectIceRestartTimeout) clearTimeout(disconnectIceRestartTimeout);
-            disconnectIceRestartTimeout = setTimeout(() => {
-              if (
-                pcRef.current &&
-                (pcRef.current.connectionState === "disconnected" ||
-                  pcRef.current.connectionState === "failed")
-              ) {
-                requestIceRecovery(false);
-              }
-            }, 1500);
-          }
-
-          let secsLeft = totalGraceSecs;
-          if (reconnectTimerRef.current) clearInterval(reconnectTimerRef.current);
-          const countdown = setInterval(() => {
-            secsLeft -= 1;
-            setReconnectSecsLeft(secsLeft);
-            if (secsLeft === 10 || secsLeft === 5) {
-              if (
-                pcRef.current &&
-                (pcRef.current.connectionState === "disconnected" ||
-                  pcRef.current.connectionState === "failed")
-              ) {
-                requestIceRecovery(false);
-              }
-            }
-            if (secsLeft <= 0) {
-              clearInterval(countdown);
-              if (
-                pcRef.current &&
-                (pcRef.current.connectionState === "disconnected" ||
-                  pcRef.current.connectionState === "failed")
-              ) {
-                setErrorMsg("Video connection dropped. Collaboration tools remain active.");
-                setReconnecting(false);
-              }
-            }
-          }, 1000);
-          reconnectTimerRef.current = countdown;
+          handleConnectionDrop(state);
         }
       };
 
@@ -1500,23 +1480,17 @@ const VideoCallOverlay = ({
 
     resetPeerConnectionRef.current = () => {
       if (!isMounted) return;
+      hasConnectedOnce = false;
       buildPeerConnection(activeRtcConfig);
     };
 
     const setupCall = async () => {
-      // Pre-fetch dynamic TURN/ICE in background without stalling media setup
-      void fetchRuntimeIceServers().then((dynamicIceServers) => {
-        if (!isMounted || !dynamicIceServers) return;
-        activeRtcConfig = { ...RTC_CONFIG, iceServers: dynamicIceServers };
-        const pc = pcRef.current;
-        if (pc && pc.connectionState !== "closed" && typeof pc.setConfiguration === "function") {
-          try {
-            pc.setConfiguration(activeRtcConfig);
-          } catch {
-            // Browser rejected runtime ICE config update
-          }
-        }
-      });
+      // Wait at most 400ms concurrently with getUserMedia so any dynamic server TURN config
+      // is baked into RTCPeerConnection BEFORE creating Offer/Answer (no mid-flight setConfiguration).
+      const runtimeIcePromise = Promise.race([
+        fetchRuntimeIceServers(),
+        new Promise((resolve) => setTimeout(() => resolve(null), 400)),
+      ]);
 
       let stream = null;
       try {
@@ -1543,6 +1517,11 @@ const VideoCallOverlay = ({
             setTimeout(() => setErrorMsg(null), 4000);
           }
         }
+      }
+
+      const dynamicIceServers = await runtimeIcePromise;
+      if (Array.isArray(dynamicIceServers) && dynamicIceServers.length > 0) {
+        activeRtcConfig = { ...RTC_CONFIG, iceServers: dynamicIceServers };
       }
 
       if (!isMounted) {
@@ -1600,7 +1579,7 @@ const VideoCallOverlay = ({
           let retries = 0;
           readyRetryInterval = setInterval(() => {
             retries += 1;
-            if (!pcRef.current || pcRef.current.remoteDescription || retries >= 20) {
+            if (!pcRef.current || pcRef.current.remoteDescription || retries >= 15) {
               clearInterval(readyRetryInterval);
               readyRetryInterval = null;
               return;
@@ -1611,7 +1590,7 @@ const VideoCallOverlay = ({
               from: currentUserEmail,
               scheduleId: schedule?._id,
             });
-          }, 150);
+          }, 450);
         }
       }
     };

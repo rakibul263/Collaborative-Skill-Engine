@@ -3379,10 +3379,9 @@ async function run() {
         }
 
         const servers = [
+          { urls: "stun:stun.cloudflare.com:3478" },
           { urls: "stun:stun.l.google.com:19302" },
           { urls: "stun:stun1.l.google.com:19302" },
-          { urls: "stun:stun.cloudflare.com:3478" },
-          { urls: "stun:openrelay.metered.ca:80" },
         ];
 
         if (process.env.ICE_SERVERS_JSON) {
@@ -3413,7 +3412,7 @@ async function run() {
               }
             }
           } catch {
-            // fallback to TURN env or OpenRelay below
+            // fallback to TURN env or STUN below
           }
         }
 
@@ -3423,24 +3422,6 @@ async function run() {
             username: process.env.TURN_USERNAME || "",
             credential: process.env.TURN_PASSWORD || "",
           });
-        } else {
-          servers.push(
-            {
-              urls: "turn:openrelay.metered.ca:80",
-              username: "openrelayproject",
-              credential: "openrelayproject",
-            },
-            {
-              urls: "turn:openrelay.metered.ca:443",
-              username: "openrelayproject",
-              credential: "openrelayproject",
-            },
-            {
-              urls: "turn:openrelay.metered.ca:443?transport=tcp",
-              username: "openrelayproject",
-              credential: "openrelayproject",
-            }
-          );
         }
 
         iceServersCache = servers;
@@ -3449,14 +3430,9 @@ async function run() {
       } catch {
         return res.json({
           iceServers: [
+            { urls: "stun:stun.cloudflare.com:3478" },
             { urls: "stun:stun.l.google.com:19302" },
             { urls: "stun:stun1.l.google.com:19302" },
-            { urls: "stun:openrelay.metered.ca:80" },
-            {
-              urls: "turn:openrelay.metered.ca:443?transport=tcp",
-              username: "openrelayproject",
-              credential: "openrelayproject",
-            },
           ],
         });
       }
