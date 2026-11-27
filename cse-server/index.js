@@ -173,8 +173,8 @@ const io = new Server(httpServer, {
   cors: corsConfig,
   transports: ["websocket", "polling"],
   perMessageDeflate: false,
-  pingInterval: 25000,
-  pingTimeout: 25000,
+  pingInterval: 10000,
+  pingTimeout: 8000,
 });
 
 const onlineUsers = new Map();
@@ -849,10 +849,115 @@ async function run() {
           yjsUpdates: [],
           whiteboardStrokes: [],
           chatMessages: [],
+          participants: new Map(),
           updatedAt: Date.now(),
         });
       }
       return collabRooms.get(key);
+    };
+
+    const getParticipantKey = (user, socket) => {
+      const rawEmail = String(user?.email || socket?.data?.email || "").trim().toLowerCase();
+      return rawEmail || `socket:${socket.id}`;
+    };
+
+    const normalizeParticipantUser = (user, socket) => {
+      const email = String(user?.email || socket?.data?.email || "").trim();
+      return {
+        ...(user && typeof user === "object" ? user : {}),
+        email,
+        lowerEmail: email.toLowerCase(),
+        name: user?.name || user?.fullName || (email ? email.split("@")[0] : "Partner"),
+      };
+    };
+
+    const trackSocketInCollabRoom = (socket, roomId, user) => {
+      const key = String(roomId || "").trim();
+      if (!key) return { roomState: null, isNewSocket: false, participant: null };
+      const roomState = getOrCreateCollabRoom(key);
+      if (!(roomState.participants instanceof Map)) {
+        roomState.participants = new Map();
+      }
+      if (!(socket.data.collabRooms instanceof Set)) {
+        socket.data.collabRooms = new Set();
+      }
+      socket.data.collabRooms.add(key);
+
+      const pKey = getParticipantKey(user, socket);
+      const participantUser = normalizeParticipantUser(user, socket);
+      const existing = roomState.participants.get(pKey);
+      if (existing) {
+        const isNewSocket = !existing.socketIds.has(socket.id);
+        existing.socketIds.add(socket.id);
+        existing.user = { ...existing.user, ...participantUser };
+        roomState.updatedAt = Date.now();
+        return {
+          roomState,
+          isNewSocket,
+          participant: existing.user,
+        };
+      }
+
+      const entry = {
+        user: participantUser,
+        socketIds: new Set([socket.id]),
+      };
+      roomState.participants.set(pKey, entry);
+      roomState.updatedAt = Date.now();
+      return {
+        roomState,
+        isNewSocket: true,
+        participant: entry.user,
+      };
+    };
+
+    const removeSocketFromCollabRoom = (socket, roomId, explicitUser) => {
+      const key = String(roomId || "").trim();
+      if (!key) return { removedLastSocket: false, participant: null };
+      const roomState = collabRooms.get(key);
+      if (socket.data.collabRooms instanceof Set) {
+        socket.data.collabRooms.delete(key);
+      }
+      if (!roomState || !(roomState.participants instanceof Map)) {
+        return {
+          removedLastSocket: false,
+          participant: explicitUser || (socket.data?.email ? { email: socket.data.email } : null),
+        };
+      }
+
+      const targetKey = getParticipantKey(explicitUser, socket);
+      let matchedKey = null;
+      let matchedEntry = roomState.participants.get(targetKey);
+      if (matchedEntry && matchedEntry.socketIds.has(socket.id)) {
+        matchedKey = targetKey;
+      } else {
+        for (const [k, entry] of roomState.participants.entries()) {
+          if (entry.socketIds.has(socket.id)) {
+            matchedKey = k;
+            matchedEntry = entry;
+            break;
+          }
+        }
+      }
+
+      if (!matchedKey || !matchedEntry) {
+        return { removedLastSocket: false, participant: null };
+      }
+
+      matchedEntry.socketIds.delete(socket.id);
+      const participant = matchedEntry.user;
+      if (matchedEntry.socketIds.size === 0) {
+        roomState.participants.delete(matchedKey);
+        roomState.updatedAt = Date.now();
+        return { removedLastSocket: true, participant };
+      }
+
+      return { removedLastSocket: false, participant };
+    };
+
+    const getRoomParticipants = (roomState) => {
+      if (!roomState || !(roomState.participants instanceof Map)) return [];
+      return Array.from(roomState.participants.values()).map((entry) => entry.user);
     };
 
     const emitToUser = (targetEmail, eventName, payload) => {
@@ -1263,15 +1368,28 @@ async function run() {
       });
 
       socket.on("rtc:end", ({ to, roomId, scheduleId }) => {
+        const senderEmail = socket.data.email || "";
         const payload = {
-          from: socket.data.email,
+          from: senderEmail,
           scheduleId,
+          roomId,
         };
-        if (to && to !== "group") {
-          emitToUser(to, "rtc:ended", payload);
-        }
+        relayRtcSignal(socket, to, roomId, "rtc:ended", payload);
         if (roomId) {
-          socket.to(`code-room:${roomId}`).emit("rtc:ended", payload);
+          const { removedLastSocket, participant } = removeSocketFromCollabRoom(
+            socket,
+            roomId,
+            senderEmail ? { email: senderEmail } : null,
+          );
+          socket.leave(`code-room:${roomId}`);
+          if (removedLastSocket) {
+            socket.to(`code-room:${roomId}`).emit("code:peer-left", {
+              socketId: socket.id,
+              roomId,
+              reason: "ended",
+              user: participant || { email: senderEmail },
+            });
+          }
         }
       });
 
@@ -1281,7 +1399,11 @@ async function run() {
         const roomName = `code-room:${roomId}`;
         socket.join(roomName);
 
-        const roomState = getOrCreateCollabRoom(roomId);
+        const { roomState, isNewSocket, participant } = trackSocketInCollabRoom(
+          socket,
+          roomId,
+          user,
+        );
         socket.emit("collab:room-init", {
           roomId,
           mode: roomState.mode,
@@ -1289,22 +1411,35 @@ async function run() {
           yjsUpdates: roomState.yjsUpdates,
           whiteboardStrokes: roomState.whiteboardStrokes,
           chatMessages: roomState.chatMessages,
+          participants: getRoomParticipants(roomState),
         });
 
-        socket.to(roomName).emit("code:peer-joined", {
-          socketId: socket.id,
-          user: user || { email: socket.data.email },
-        });
+        if (isNewSocket) {
+          socket.to(roomName).emit("code:peer-joined", {
+            socketId: socket.id,
+            roomId,
+            user: participant || user || { email: socket.data.email },
+          });
+        }
       });
 
       socket.on("code:leave-room", ({ roomId, user }) => {
         if (!roomId) return;
         const roomName = `code-room:${roomId}`;
         socket.leave(roomName);
-        socket.to(roomName).emit("code:peer-left", {
-          socketId: socket.id,
-          user: user || { email: socket.data.email },
-        });
+        const { removedLastSocket, participant } = removeSocketFromCollabRoom(
+          socket,
+          roomId,
+          user,
+        );
+        if (removedLastSocket) {
+          socket.to(roomName).emit("code:peer-left", {
+            socketId: socket.id,
+            roomId,
+            reason: "left",
+            user: participant || user || { email: socket.data.email },
+          });
+        }
       });
 
       socket.on("collab:mode-change", ({ roomId, mode, user }) => {
@@ -1418,10 +1553,15 @@ async function run() {
       });
 
       // ─── Real-Time Collaborative Whiteboard Sync ───
-      socket.on("whiteboard:draw-live", ({ roomId, stroke, user }) => {
-        if (!roomId || !stroke) return;
+      socket.on("whiteboard:draw-live", ({ roomId, stroke, strokeId, deltaPoints, tool, color, size, user }) => {
+        if (!roomId || (!stroke && (!strokeId || !Array.isArray(deltaPoints) || deltaPoints.length === 0))) return;
         socket.to(`code-room:${roomId}`).emit("whiteboard:draw-live", {
-          stroke,
+          ...(stroke ? { stroke } : {}),
+          ...(strokeId ? { strokeId } : {}),
+          ...(Array.isArray(deltaPoints) ? { deltaPoints } : {}),
+          ...(tool ? { tool } : {}),
+          ...(color ? { color } : {}),
+          ...(typeof size === "number" ? { size } : {}),
           user: user || { email: socket.data.email },
         });
       });
@@ -1470,6 +1610,23 @@ async function run() {
       });
 
       socket.on("disconnect", () => {
+        if (socket.data?.collabRooms instanceof Set && socket.data.collabRooms.size > 0) {
+          for (const roomId of Array.from(socket.data.collabRooms)) {
+            const { removedLastSocket, participant } = removeSocketFromCollabRoom(
+              socket,
+              roomId,
+            );
+            if (removedLastSocket) {
+              socket.to(`code-room:${roomId}`).emit("code:peer-left", {
+                socketId: socket.id,
+                roomId,
+                reason: "disconnect",
+                user: participant || { email: socket.data?.email },
+              });
+            }
+          }
+        }
+
         const targetEmail =
           socket.data?.lowerEmail ||
           (socket.data?.email ? socket.data.email.toLowerCase().trim() : "");
