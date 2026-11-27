@@ -9,6 +9,7 @@ const cookieParser = require("cookie-parser");
 const { createServer } = require("http");
 const zlib = require("zlib");
 const { Server } = require("socket.io");
+const { AccessToken } = require("livekit-server-sdk");
 const { registerAiAdvisorRoutes } = require("./routes/aiAdvisor.routes");
 const { registerAuthRoutes } = require("./routes/auth.routes");
 const { registerNotificationRoutes } = require("./routes/notifications.routes");
@@ -3435,6 +3436,62 @@ async function run() {
             { urls: "stun:stun1.l.google.com:19302" },
           ],
         });
+      }
+    });
+
+    app.post("/rtc/livekit-token", verifyJWT, async (req, res) => {
+      try {
+        const livekitUrl = String(process.env.LIVEKIT_URL || "").trim();
+        const apiKey = String(process.env.LIVEKIT_API_KEY || "").trim();
+        const apiSecret = String(process.env.LIVEKIT_API_SECRET || "").trim();
+
+        if (!livekitUrl || !apiKey || !apiSecret) {
+          return res.status(503).json({
+            configured: false,
+            message: "LiveKit credentials are not configured on the server.",
+          });
+        }
+
+        const rawRoomId = String(req.body?.roomId || "").trim();
+        if (!rawRoomId) {
+          return res.status(400).json({ message: "roomId is required for LiveKit token." });
+        }
+
+        const identity = String(req.user?.email || req.body?.email || "")
+          .trim()
+          .toLowerCase();
+        if (!identity) {
+          return res.status(400).json({ message: "Authenticated user identity is required." });
+        }
+
+        const displayName =
+          String(req.body?.participantName || "").trim() || identity.split("@")[0];
+        const roomName = `cse-${rawRoomId}`;
+
+        const at = new AccessToken(apiKey, apiSecret, {
+          identity,
+          name: displayName,
+          ttl: "4h",
+        });
+        at.addGrant({
+          roomJoin: true,
+          room: roomName,
+          canPublish: true,
+          canSubscribe: true,
+          canPublishData: true,
+        });
+
+        const token = await at.toJwt();
+        return res.json({
+          configured: true,
+          url: livekitUrl,
+          token,
+          roomName,
+          identity,
+        });
+      } catch (err) {
+        console.error("[/rtc/livekit-token] error:", err);
+        return res.status(500).json({ message: "Failed to generate LiveKit access token." });
       }
     });
 
