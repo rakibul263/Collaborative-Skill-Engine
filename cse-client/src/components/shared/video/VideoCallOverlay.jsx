@@ -5,6 +5,7 @@ import { createMonacoYjsBinding } from "@/lib/monacoYjs";
 import { playNotificationSound } from "@/lib/notificationSound";
 import Editor from "@monaco-editor/react";
 import { AnimatePresence, motion as Motion } from "framer-motion";
+import { ConnectionState, Room, RoomEvent, Track, VideoPresets } from "livekit-client";
 import {
     Check,
     ChevronDown,
@@ -395,6 +396,7 @@ const VideoCallOverlay = ({
   const [leftPeerName, setLeftPeerName] = useState("");
   const [reconnecting, setReconnecting] = useState(false);
   const [reconnectSecsLeft, setReconnectSecsLeft] = useState(15);
+  const [audioPlaybackBlocked, setAudioPlaybackBlocked] = useState(false);
 
   const rootOverlayRef = useRef(null);
   const localVideoRef = useRef(null);
@@ -403,6 +405,8 @@ const VideoCallOverlay = ({
   const remoteScreenRef = useRef(null);
   const remoteAudioRef = useRef(null);
 
+  const livekitRoomRef = useRef(null);
+  const usingLiveKitRef = useRef(false);
   const streamRef = useRef(null);
   const screenStreamRef = useRef(null);
   const screenSenderRef = useRef(null);
@@ -863,6 +867,18 @@ const VideoCallOverlay = ({
     hasCleanedUpRef.current = true;
     resetPeerConnectionRef.current = null;
 
+    if (livekitRoomRef.current) {
+      try {
+        livekitRoomRef.current.removeAllListeners();
+        void livekitRoomRef.current.disconnect();
+      } catch {
+        // ignore LiveKit disconnect cleanup error
+      }
+      livekitRoomRef.current = null;
+    }
+    usingLiveKitRef.current = false;
+    setAudioPlaybackBlocked(false);
+
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
@@ -1011,12 +1027,13 @@ const VideoCallOverlay = ({
       if (from && from.toLowerCase() !== (currentUserEmail || "").toLowerCase() && !resolvedPeerEmailRef.current) {
         resolvedPeerEmailRef.current = from;
       }
+      if (usingLiveKitRef.current) return;
+      if (!offer || !offer.sdp || offer.type === "livekit-invite") return;
       const pc = pcRef.current;
       if (!pc) {
         pendingOfferRef.current = { offer, from };
         return;
       }
-      if (!offer) return;
       try {
         if (
           pc.remoteDescription?.type === "offer" &&
@@ -1059,11 +1076,13 @@ const VideoCallOverlay = ({
       if (from) {
         markRemotePeerJoined({ email: from });
       }
+      if (usingLiveKitRef.current) return;
       handleIncomingOffer(offer, from);
     };
 
     const onRtcAnswer = async ({ answer, from }) => {
       if (from && currentUserEmail && from.toLowerCase() === currentUserEmail.toLowerCase()) return;
+      if (usingLiveKitRef.current) return;
       const pc = pcRef.current;
       if (!pc || !answer) return;
       try {
@@ -1078,7 +1097,7 @@ const VideoCallOverlay = ({
 
     const onRtcIceCandidate = async ({ candidate, from }) => {
       if (from && currentUserEmail && from.toLowerCase() === currentUserEmail.toLowerCase()) return;
-      if (!candidate) return;
+      if (usingLiveKitRef.current || !candidate) return;
       const pc = pcRef.current;
       if (pc && pc.remoteDescription) {
         try {
@@ -1095,6 +1114,10 @@ const VideoCallOverlay = ({
       if (from && currentUserEmail && from.toLowerCase() === currentUserEmail.toLowerCase()) return;
       if (from) {
         markRemotePeerJoined({ email: from });
+      }
+      if (usingLiveKitRef.current) {
+        emitMediaState();
+        return;
       }
       const pc = pcRef.current;
       if (!pc) {
@@ -1148,15 +1171,30 @@ const VideoCallOverlay = ({
       if (from && peerCallStateRef.current !== "left") {
         markRemotePeerJoined({ email: from });
       }
+      let nextCamOff = Boolean(pcam);
+      let nextMuted = Boolean(pm);
+      let nextScreenSharing = Boolean(pss);
+      if (usingLiveKitRef.current && livekitRoomRef.current && from) {
+        const senderLower = String(from).trim().toLowerCase();
+        livekitRoomRef.current.remoteParticipants.forEach((p) => {
+          if (String(p.identity || "").trim().toLowerCase() !== senderLower) return;
+          const camPub = p.getTrackPublication?.(Track.Source.Camera);
+          const micPub = p.getTrackPublication?.(Track.Source.Microphone);
+          const screenPub = p.getTrackPublication?.(Track.Source.ScreenShare);
+          if (camPub && camPub.track && !camPub.isMuted) nextCamOff = false;
+          if (micPub && !micPub.isMuted) nextMuted = false;
+          if (screenPub && screenPub.track && !screenPub.isMuted) nextScreenSharing = true;
+        });
+      }
       setPeerMediaState({
-        isMuted: Boolean(pm),
-        isCameraOff: Boolean(pcam),
-        isScreenSharing: Boolean(pss),
+        isMuted: nextMuted,
+        isCameraOff: nextCamOff,
+        isScreenSharing: nextScreenSharing,
         cameraStreamId: cameraStreamId || null,
         screenStreamId: screenStreamId || null,
       });
 
-      if (!pss) {
+      if (!nextScreenSharing) {
         remoteScreenStreamRef.current = null;
         setHasRemoteScreen(false);
         setSpotlightTile((prev) => (prev === "remote-screen" ? null : prev));
@@ -1182,6 +1220,10 @@ const VideoCallOverlay = ({
           color: userColor,
         },
       });
+      if (usingLiveKitRef.current) {
+        emitMediaState();
+        return;
+      }
       socket.emit("rtc:ready", {
         to: getTargetPeer(),
         roomId,
@@ -1506,9 +1548,406 @@ const VideoCallOverlay = ({
       }
     };
 
+    const connectWithLiveKit = async () => {
+      if (!roomId || !isMounted) return false;
+
+      let tokenPayload = null;
+      try {
+        const res = await apiClient.post(
+          "/rtc/livekit-token",
+          {
+            roomId,
+            participantName: currentUserNameRef.current || currentUserEmail || "Participant",
+          },
+          { timeout: 6000 }
+        );
+        tokenPayload = res?.data;
+      } catch (err) {
+        if (err?.response?.status !== 503) {
+          console.warn("[LiveKit] Token fetch failed, falling back to P2P:", err?.message || err);
+        }
+        return false;
+      }
+
+      if (!isMounted) return false;
+      if (!tokenPayload?.configured || !tokenPayload?.token || !tokenPayload?.url) {
+        return false;
+      }
+
+      const room = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+        videoCaptureDefaults: {
+          resolution: VideoPresets.h540.resolution,
+          facingMode: "user",
+        },
+        publishDefaults: {
+          simulcast: true,
+          videoEncoding: VideoPresets.h540.encoding,
+          screenShareEncoding: VideoPresets.h1080.encoding,
+          dtx: true,
+          red: true,
+        },
+      });
+
+      livekitRoomRef.current = room;
+      usingLiveKitRef.current = true;
+
+      const isSelfParticipant = (participant) => {
+        const id = String(participant?.identity || "").trim().toLowerCase();
+        const selfId = String(currentUserEmail || "").trim().toLowerCase();
+        return Boolean(id && selfId && id === selfId);
+      };
+
+      const syncParticipantMediaState = (participant) => {
+        if (!participant || isSelfParticipant(participant)) return;
+        let micMuted = true;
+        let camOff = true;
+        let screenSharing = false;
+        participant.trackPublications.forEach((pub) => {
+          if (pub.source === Track.Source.Microphone) {
+            micMuted = pub.isMuted;
+          } else if (pub.source === Track.Source.Camera) {
+            camOff = pub.isMuted;
+          } else if (pub.source === Track.Source.ScreenShare) {
+            screenSharing = !pub.isMuted && Boolean(pub.track || pub.isSubscribed);
+          }
+        });
+        setPeerMediaState((prev) => ({
+          ...prev,
+          isMuted: micMuted,
+          isCameraOff: camOff,
+          isScreenSharing: screenSharing,
+        }));
+      };
+
+      const bindRemoteTrack = (track, publication, participant) => {
+        if (!isMounted || !track || isSelfParticipant(participant)) return;
+        const identity = String(participant?.identity || "").trim();
+        if (identity) {
+          markRemotePeerJoined({ email: identity, name: participant?.name || undefined });
+        }
+
+        const mediaTrack = track.mediaStreamTrack;
+        if (!mediaTrack) return;
+
+        mediaTrack.onunmute = () => {
+          if (!isMounted) return;
+          if (publication?.source === Track.Source.ScreenShare) {
+            setHasRemoteScreen(true);
+            remoteScreenRef.current?.play?.().catch(() => {});
+          } else if (track.kind === Track.Kind.Video || track.kind === "video") {
+            setHasRemoteVideo(true);
+            remoteVideoRef.current?.play?.().catch(() => {});
+          } else {
+            remoteAudioRef.current?.play?.().catch(() => {});
+          }
+        };
+
+        if (track.kind === Track.Kind.Audio || track.kind === "audio") {
+          const existingTracks = remoteAudioStreamRef.current?.getAudioTracks() || [];
+          const mergedStream = new MediaStream([
+            ...existingTracks.filter((t) => t.id !== mediaTrack.id && t.readyState === "live"),
+            mediaTrack,
+          ]);
+          remoteAudioStreamRef.current = mergedStream;
+          if (remoteAudioRef.current) {
+            remoteAudioRef.current.srcObject = mergedStream;
+            remoteAudioRef.current.play?.().catch(() => {
+              setAudioPlaybackBlocked(true);
+            });
+          }
+          syncParticipantMediaState(participant);
+          return;
+        }
+
+        if (publication?.source === Track.Source.ScreenShare) {
+          const screenStream = new MediaStream([mediaTrack]);
+          remoteScreenStreamRef.current = screenStream;
+          setHasRemoteScreen(true);
+          setSpotlightTile("remote-screen");
+          if (remoteScreenRef.current) {
+            remoteScreenRef.current.srcObject = screenStream;
+            remoteScreenRef.current.play?.().catch(() => {});
+          }
+          syncParticipantMediaState(participant);
+          return;
+        }
+
+        const camStream = new MediaStream([mediaTrack]);
+        remoteCameraStreamRef.current = camStream;
+        setHasRemoteVideo(true);
+        setRtcConnected(true);
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = camStream;
+          remoteVideoRef.current.play?.().catch(() => {});
+        }
+        syncParticipantMediaState(participant);
+      };
+
+      const unbindRemoteTrack = (track, publication, participant) => {
+        if (!isMounted || !track || isSelfParticipant(participant)) return;
+        const mediaTrack = track.mediaStreamTrack;
+        if (track.kind === Track.Kind.Audio || track.kind === "audio") {
+          if (remoteAudioStreamRef.current && mediaTrack) {
+            const remaining = remoteAudioStreamRef.current
+              .getAudioTracks()
+              .filter((t) => t.id !== mediaTrack.id && t.readyState === "live");
+            const nextStream = remaining.length > 0 ? new MediaStream(remaining) : null;
+            remoteAudioStreamRef.current = nextStream;
+            if (remoteAudioRef.current) remoteAudioRef.current.srcObject = nextStream;
+          }
+        } else if (publication?.source === Track.Source.ScreenShare) {
+          remoteScreenStreamRef.current = null;
+          setHasRemoteScreen(false);
+          setSpotlightTile((prev) => (prev === "remote-screen" ? null : prev));
+          if (remoteScreenRef.current) remoteScreenRef.current.srcObject = null;
+        } else {
+          remoteCameraStreamRef.current = null;
+          setHasRemoteVideo(false);
+          if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+        }
+        syncParticipantMediaState(participant);
+      };
+
+      const syncLocalVideoPreview = () => {
+        const camPub = room.localParticipant.getTrackPublication(Track.Source.Camera);
+        const camTrack = camPub?.track?.mediaStreamTrack;
+        if (camTrack && camTrack.readyState === "live" && !camPub.isMuted) {
+          if ("contentHint" in camTrack) camTrack.contentHint = "motion";
+          const localCamStream = new MediaStream([camTrack]);
+          streamRef.current = localCamStream;
+          setHasLocalVideo(true);
+          setIsCameraOff(false);
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = localCamStream;
+            localVideoRef.current.play?.().catch(() => {});
+          }
+        } else {
+          if (!camTrack) {
+            streamRef.current = null;
+            setHasLocalVideo(false);
+          }
+          setIsCameraOff(true);
+        }
+
+        const micPub = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+        const micTrack = micPub?.track?.mediaStreamTrack;
+        if (micTrack && "contentHint" in micTrack) {
+          micTrack.contentHint = "speech";
+        }
+        setIsMuted(!micPub || micPub.isMuted);
+      };
+
+      room
+        .on(RoomEvent.Connected, () => {
+          if (!isMounted) return;
+          hasConnectedOnce = true;
+          setRtcConnected(true);
+          setReconnecting(false);
+          setErrorMsg(null);
+        })
+        .on(RoomEvent.Reconnecting, () => {
+          if (!isMounted) return;
+          setRtcConnected(false);
+          if (peerCallStateRef.current === "joined") {
+            setReconnecting(true);
+          }
+        })
+        .on(RoomEvent.Reconnected, () => {
+          if (!isMounted) return;
+          setRtcConnected(true);
+          setReconnecting(false);
+          setErrorMsg(null);
+        })
+        .on(RoomEvent.Disconnected, () => {
+          if (!isMounted) return;
+          setRtcConnected(false);
+          setReconnecting(false);
+        })
+        .on(RoomEvent.ParticipantConnected, (participant) => {
+          if (!isMounted || isSelfParticipant(participant)) return;
+          markRemotePeerJoined({
+            email: participant.identity,
+            name: participant.name || undefined,
+          });
+          syncParticipantMediaState(participant);
+        })
+        .on(RoomEvent.ParticipantDisconnected, (participant) => {
+          if (!isMounted || isSelfParticipant(participant)) return;
+          handleRemotePeerLeft({
+            email: participant.identity,
+            name: participant.name || undefined,
+          });
+        })
+        .on(RoomEvent.TrackSubscribed, bindRemoteTrack)
+        .on(RoomEvent.TrackUnsubscribed, unbindRemoteTrack)
+        .on(RoomEvent.TrackMuted, (publication, participant) => {
+          if (!isMounted) return;
+          if (isSelfParticipant(participant)) {
+            syncLocalVideoPreview();
+            return;
+          }
+          if (publication?.source === Track.Source.Camera) {
+            setPeerMediaState((prev) => ({ ...prev, isCameraOff: true }));
+          } else if (publication?.source === Track.Source.Microphone) {
+            setPeerMediaState((prev) => ({ ...prev, isMuted: true }));
+          }
+        })
+        .on(RoomEvent.TrackUnmuted, (publication, participant) => {
+          if (!isMounted) return;
+          if (isSelfParticipant(participant)) {
+            syncLocalVideoPreview();
+            return;
+          }
+          if (publication?.source === Track.Source.Camera) {
+            setPeerMediaState((prev) => ({ ...prev, isCameraOff: false }));
+            if (publication.track) bindRemoteTrack(publication.track, publication, participant);
+          } else if (publication?.source === Track.Source.Microphone) {
+            setPeerMediaState((prev) => ({ ...prev, isMuted: false }));
+          }
+        })
+        .on(RoomEvent.LocalTrackPublished, () => {
+          if (!isMounted) return;
+          syncLocalVideoPreview();
+        })
+        .on(RoomEvent.LocalTrackUnpublished, (publication) => {
+          if (!isMounted) return;
+          if (publication?.source === Track.Source.ScreenShare) {
+            screenStreamRef.current = null;
+            if (localScreenRef.current) localScreenRef.current.srcObject = null;
+            setIsScreenSharing(false);
+            setSpotlightTile((prev) => (prev === "local-screen" ? null : prev));
+            emitMediaState({ isScreenSharing: false, screenStreamId: null });
+          } else {
+            syncLocalVideoPreview();
+          }
+        })
+        .on(RoomEvent.AudioPlaybackStatusChanged, () => {
+          if (!isMounted) return;
+          setAudioPlaybackBlocked(!room.canPlaybackAudio);
+        });
+
+      try {
+        await room.connect(tokenPayload.url, tokenPayload.token, {
+          autoSubscribe: true,
+        });
+      } catch (connectErr) {
+        console.warn("[LiveKit] Room connect failed, falling back to P2P:", connectErr);
+        try {
+          room.removeAllListeners();
+          await room.disconnect();
+        } catch {
+          // ignore
+        }
+        if (livekitRoomRef.current === room) livekitRoomRef.current = null;
+        usingLiveKitRef.current = false;
+        return false;
+      }
+
+      if (!isMounted) {
+        room.removeAllListeners();
+        void room.disconnect();
+        if (livekitRoomRef.current === room) livekitRoomRef.current = null;
+        usingLiveKitRef.current = false;
+        return false;
+      }
+
+      hasConnectedOnce = true;
+      setRtcConnected(true);
+      setReconnecting(false);
+      setAudioPlaybackBlocked(!room.canPlaybackAudio);
+      room.startAudio().catch(() => {});
+
+      room.remoteParticipants.forEach((participant) => {
+        if (isSelfParticipant(participant)) return;
+        markRemotePeerJoined({
+          email: participant.identity,
+          name: participant.name || undefined,
+        });
+        participant.trackPublications.forEach((publication) => {
+          if (publication.isSubscribed && publication.track) {
+            bindRemoteTrack(publication.track, publication, participant);
+          }
+        });
+        syncParticipantMediaState(participant);
+      });
+
+      try {
+        await room.localParticipant.enableCameraAndMicrophone();
+      } catch {
+        try {
+          await room.localParticipant.setMicrophoneEnabled(true);
+          if (isMounted) {
+            setIsCameraOff(true);
+            setErrorMsg("Camera unavailable — joined with audio only.");
+            setTimeout(() => setErrorMsg(null), 3500);
+          }
+        } catch {
+          if (isMounted) {
+            setIsCameraOff(true);
+            setIsMuted(true);
+            setErrorMsg("Camera/microphone access denied — joined in view-only mode.");
+            setTimeout(() => setErrorMsg(null), 4000);
+          }
+        }
+      }
+
+      syncLocalVideoPreview();
+
+      manualReconnectRef.current = async () => {
+        setErrorMsg(null);
+        try {
+          await room.startAudio();
+          setAudioPlaybackBlocked(!room.canPlaybackAudio);
+        } catch {
+          // ignore
+        }
+        if (room.state !== ConnectionState.Connected) {
+          setReconnecting(true);
+          try {
+            await room.connect(tokenPayload.url, tokenPayload.token, { autoSubscribe: true });
+          } catch {
+            setErrorMsg("Connection dropped — please rejoin the call.");
+          } finally {
+            setReconnecting(false);
+          }
+        }
+      };
+
+      const camPubNow = room.localParticipant.getTrackPublication(Track.Source.Camera);
+      const micPubNow = room.localParticipant.getTrackPublication(Track.Source.Microphone);
+
+      if (socket) {
+        socket.emit("rtc:ready", {
+          to: getTargetPeer(),
+          roomId,
+          from: currentUserEmail,
+          scheduleId: schedule?._id,
+        });
+        emitMediaState({
+          isMuted: !micPubNow || micPubNow.isMuted,
+          isCameraOff: !camPubNow || camPubNow.isMuted,
+        });
+        if (getEffectiveIsCaller() && getTargetPeer()) {
+          socket.emit("rtc:offer", {
+            to: getTargetPeer(),
+            roomId,
+            from: currentUserEmail,
+            offer: { type: "livekit-invite", sdp: "livekit" },
+            scheduleId: schedule?._id,
+          });
+        }
+      }
+
+      return true;
+    };
+
     const setupCall = async () => {
-      // Wait at most 400ms concurrently with getUserMedia so any dynamic server TURN config
-      // is baked into RTCPeerConnection BEFORE creating Offer/Answer (no mid-flight setConfiguration).
+      const livekitReady = await connectWithLiveKit();
+      if (livekitReady || !isMounted) return;
+
+      // Fallback to P2P WebRTC only if LiveKit token/room is unavailable
       const runtimeIcePromise = Promise.race([
         fetchRuntimeIceServers(),
         new Promise((resolve) => setTimeout(() => resolve(null), 400)),
@@ -2305,8 +2744,22 @@ const VideoCallOverlay = ({
   }, [schedule?.startTime, schedule?.isInstantCall, schedule?.durationMinutes, serverOffset, cleanup]);
 
   // ─── Media Controls ────────────────────────────────────────────────────────
-  const handleToggleMute = () => {
+  const handleToggleMute = async () => {
     const nextMuted = !isMuted;
+    if (audioPlaybackBlocked) {
+      livekitRoomRef.current?.startAudio().catch(() => {});
+      remoteAudioRef.current?.play?.().then(() => setAudioPlaybackBlocked(false)).catch(() => {});
+    }
+    if (usingLiveKitRef.current && livekitRoomRef.current) {
+      try {
+        await livekitRoomRef.current.localParticipant.setMicrophoneEnabled(!nextMuted);
+        setIsMuted(nextMuted);
+        emitMediaState({ isMuted: nextMuted });
+      } catch {
+        toast.error("Unable to toggle microphone.");
+      }
+      return;
+    }
     if (streamRef.current) {
       streamRef.current.getAudioTracks().forEach((track) => {
         track.enabled = !nextMuted;
@@ -2318,6 +2771,36 @@ const VideoCallOverlay = ({
 
   const handleToggleCamera = async () => {
     const nextCameraOff = !isCameraOff;
+    if (usingLiveKitRef.current && livekitRoomRef.current) {
+      try {
+        await livekitRoomRef.current.localParticipant.setCameraEnabled(!nextCameraOff);
+        const camPub = livekitRoomRef.current.localParticipant.getTrackPublication(
+          Track.Source.Camera
+        );
+        const camTrack = camPub?.track?.mediaStreamTrack;
+        if (!nextCameraOff && camTrack && camTrack.readyState === "live") {
+          const localCamStream = new MediaStream([camTrack]);
+          streamRef.current = localCamStream;
+          setHasLocalVideo(true);
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = localCamStream;
+            localVideoRef.current.play?.().catch(() => {});
+          }
+        } else if (nextCameraOff) {
+          streamRef.current = null;
+          setHasLocalVideo(false);
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = null;
+          }
+        }
+        setIsCameraOff(nextCameraOff);
+        emitMediaState({ isCameraOff: nextCameraOff });
+      } catch {
+        toast.error("Unable to access camera.");
+      }
+      return;
+    }
+
     if (streamRef.current && streamRef.current.getVideoTracks().length > 0) {
       streamRef.current.getVideoTracks().forEach((track) => {
         track.enabled = !nextCameraOff;
@@ -2365,6 +2848,14 @@ const VideoCallOverlay = ({
 
   // ─── Dual-Track Screen Share (keeps BOTH faces visible!) ──────────────────
   const stopScreenShare = useCallback(async () => {
+    if (usingLiveKitRef.current && livekitRoomRef.current) {
+      try {
+        await livekitRoomRef.current.localParticipant.setScreenShareEnabled(false);
+      } catch (err) {
+        console.warn("Error stopping LiveKit screen share:", err);
+      }
+    }
+
     if (screenStreamRef.current) {
       screenStreamRef.current.getTracks().forEach((t) => t.stop());
       screenStreamRef.current = null;
@@ -2399,6 +2890,37 @@ const VideoCallOverlay = ({
   const handleToggleScreenShare = async () => {
     if (isScreenSharing) {
       await stopScreenShare();
+      return;
+    }
+
+    if (usingLiveKitRef.current && livekitRoomRef.current) {
+      try {
+        await livekitRoomRef.current.localParticipant.setScreenShareEnabled(true, {
+          audio: false,
+          resolution: VideoPresets.h1080.resolution,
+        });
+        const screenPub = livekitRoomRef.current.localParticipant.getTrackPublication(
+          Track.Source.ScreenShare
+        );
+        const screenTrack = screenPub?.track?.mediaStreamTrack;
+        if (!screenTrack) return;
+        const lkScreenStream = new MediaStream([screenTrack]);
+        screenStreamRef.current = lkScreenStream;
+        if (localScreenRef.current) {
+          localScreenRef.current.srcObject = lkScreenStream;
+          localScreenRef.current.play?.().catch(() => {});
+        }
+        emitMediaState({
+          isScreenSharing: true,
+          screenStreamId: lkScreenStream.id,
+          cameraStreamId: streamRef.current?.id || null,
+        });
+        setIsScreenSharing(true);
+        setSpotlightTile("local-screen");
+        toast.success("Screen sharing started — both cameras remain visible!");
+      } catch {
+        // User cancelled screen picker or browser unsupported
+      }
       return;
     }
 
@@ -2941,6 +3463,26 @@ const VideoCallOverlay = ({
       {showWarning && (
         <div className="bg-amber-500 text-slate-950 text-xs text-center py-1.5 font-extrabold">
           ⚠️ Scheduled session will end in {remainingSecs} seconds.
+        </div>
+      )}
+
+      {audioPlaybackBlocked && (
+        <div className="bg-emerald-500/20 border-b border-emerald-500/40 text-emerald-200 text-xs text-center py-1.5 px-3 font-semibold flex items-center justify-center gap-3 flex-wrap">
+          <span>Browser paused partner audio — tap to unlock sound.</span>
+          <button
+            type="button"
+            onClick={() => {
+              livekitRoomRef.current?.startAudio().catch(() => {});
+              remoteAudioRef.current
+                ?.play?.()
+                .then(() => setAudioPlaybackBlocked(false))
+                .catch(() => {});
+              setAudioPlaybackBlocked(false);
+            }}
+            className="px-3 py-0.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold text-[11px] transition cursor-pointer"
+          >
+            Enable Audio
+          </button>
         </div>
       )}
 
